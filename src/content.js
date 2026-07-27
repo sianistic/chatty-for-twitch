@@ -20,6 +20,11 @@
     autocompleteQuery: "",
     autocompleteIndex: 0,
     claimedPointButtons: new WeakSet(),
+    revealedFilterButtons: new WeakSet(),
+    unreadCount: 0,
+    isModerator: false,
+    pinnedSignature: "",
+    dismissedPinnedSignature: "",
     route: window.location.href,
     rescanTimer: 0,
     pointsScanTimer: 0
@@ -41,6 +46,7 @@
       ".chat-scrollable-area__message-container"
     ],
     nativeInput: "[data-a-target='chat-input'][contenteditable='true']",
+    pinned: ".pinned-chat__highlight-card",
     pointsClaim: [
       "button[aria-label*='Claim Bonus' i]",
       "button[data-test-selector='community-points-claim-button']",
@@ -105,7 +111,19 @@
         </div>
         <div class="chatty-actions"></div>
       </header>
+      <aside class="chatty-pinned" aria-label="Pinned message" hidden>
+        <div class="chatty-pinned-header">
+          <strong>PINNED</strong>
+          <span class="chatty-pinned-meta"></span>
+          <div class="chatty-pinned-actions">
+            <button type="button" class="chatty-pinned-open">View</button>
+            <button type="button" class="chatty-pinned-hide">Hide</button>
+          </div>
+        </div>
+        <div class="chatty-pinned-content"></div>
+      </aside>
       <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <button type="button" class="chatty-jump" hidden>Jump to latest</button>
       <div class="chatty-autocomplete" role="listbox" aria-label="7TV emotes" hidden></div>
       <div class="chatty-emote-card" role="tooltip" hidden>
         <img class="chatty-emote-preview" alt="">
@@ -164,6 +182,10 @@
     host.append(panel);
     state.root = panel;
     state.list = panel.querySelector(".chatty-list");
+    state.list.addEventListener("scroll", updateJumpButton, { passive: true });
+    panel.querySelector(".chatty-jump").addEventListener("click", jumpToLatest);
+    panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
+    panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
     panel.querySelector(".chatty-save").addEventListener("click", savePanelSettings);
     for (const tab of panel.querySelectorAll("[data-settings-tab]")) {
       tab.addEventListener("click", switchSettingsTab);
@@ -174,6 +196,7 @@
     panel.addEventListener("focusout", hideEmoteCard);
     applySettings();
     syncNativeComposer(host);
+    syncPinnedMessage();
     scanChannelPoints();
   }
 
@@ -483,6 +506,165 @@
     if (node) node.textContent = text;
   }
 
+  function isNearBottom() {
+    if (!state.list) return true;
+    return state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 80;
+  }
+
+  function updateJumpButton() {
+    const button = state.root?.querySelector(".chatty-jump");
+    if (!button) return;
+    const nearBottom = isNearBottom();
+    if (nearBottom) state.unreadCount = 0;
+    button.hidden = nearBottom;
+    button.textContent = state.unreadCount
+      ? `${state.unreadCount} new - Jump to latest`
+      : "Jump to latest";
+  }
+
+  function jumpToLatest() {
+    if (!state.list) return;
+    state.list.scrollTop = state.list.scrollHeight;
+    state.unreadCount = 0;
+    updateJumpButton();
+  }
+
+  function safeHttpUrl(value) {
+    try {
+      const url = new URL(value, window.location.href);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function collectFragments(container) {
+    const fragments = [];
+    function visit(parent) {
+      for (const child of parent.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          if (child.nodeValue) fragments.push({ type: "text", value: child.nodeValue });
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        if (child.matches("[data-a-target='chat-badge'], [data-a-target='chat-message-username']")) {
+          continue;
+        }
+        if (child instanceof HTMLImageElement) {
+          fragments.push({
+            type: "image",
+            src: child.currentSrc || child.src,
+            alt: child.alt || child.title || "emote"
+          });
+          continue;
+        }
+        if (child instanceof HTMLAnchorElement) {
+          const href = safeHttpUrl(child.href);
+          if (href) {
+            fragments.push({ type: "link", href, value: child.textContent || href });
+            continue;
+          }
+        }
+        visit(child);
+      }
+    }
+    visit(container);
+    return fragments;
+  }
+
+  function appendFragments(container, fragments) {
+    for (const fragment of fragments) {
+      if (fragment.type === "link") {
+        const link = document.createElement("a");
+        link.className = "chatty-link";
+        link.href = fragment.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = fragment.value || fragment.href;
+        container.append(link);
+        continue;
+      }
+      if (fragment.type === "image") {
+        const image = document.createElement("img");
+        image.className = "chatty-emote";
+        image.src = fragment.src;
+        image.alt = fragment.alt;
+        image.title = fragment.alt;
+        image.loading = "lazy";
+        decorateEmote(image, {
+          name: fragment.alt,
+          provider: "Twitch",
+          id: twitchEmoteId(fragment.src)
+        });
+        container.append(image);
+        continue;
+      }
+      for (const token of core.tokenizeEmotes(fragment.value, state.emotes)) {
+        if (token.type === "text") {
+          container.append(document.createTextNode(token.value));
+          continue;
+        }
+        const image = document.createElement("img");
+        image.className = "chatty-emote";
+        image.src = token.emote.url;
+        image.alt = token.value;
+        image.title = token.value;
+        image.loading = "lazy";
+        decorateEmote(image, token.emote);
+        container.append(image);
+      }
+    }
+  }
+
+  function readPinnedMessage(node) {
+    if (!node) return null;
+    const messageNode = node.querySelector(".pinned-chat__message");
+    if (!messageNode) return null;
+    const meta = node.querySelector(".pinned-chat__pinned-by")?.textContent?.trim() || "Pinned message";
+    const fragments = collectFragments(messageNode);
+    const text = fragments.map((fragment) => fragment.value || fragment.alt || "").join("").trim();
+    const signature = `${meta}|${text}|${fragments.map((fragment) => fragment.href || "").join("|")}`;
+    return { meta, fragments, signature, nativeNode: node };
+  }
+
+  function syncPinnedMessage() {
+    if (!state.root) return;
+    const nativePinned = Array.from(document.querySelectorAll(SELECTORS.pinned))
+      .find((node) => !state.root.contains(node));
+    const pinned = readPinnedMessage(nativePinned);
+    const panel = state.root.querySelector(".chatty-pinned");
+    if (!pinned || pinned.signature === state.dismissedPinnedSignature) {
+      panel.hidden = true;
+      if (!pinned) state.pinnedSignature = "";
+      return;
+    }
+    if (pinned.signature === state.pinnedSignature && !panel.hidden) return;
+    state.pinnedSignature = pinned.signature;
+    panel.dataset.signature = pinned.signature;
+    panel.querySelector(".chatty-pinned-meta").textContent = pinned.meta;
+    const content = panel.querySelector(".chatty-pinned-content");
+    content.replaceChildren();
+    appendFragments(content, pinned.fragments);
+    panel.hidden = false;
+  }
+
+  function openNativePinned() {
+    const nativePinned = Array.from(document.querySelectorAll(SELECTORS.pinned))
+      .find((node) => !state.root?.contains(node));
+    const button = Array.from(nativePinned?.querySelectorAll("button") || [])
+      .find((candidate) => /expand|view/i.test(
+        `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`
+      ));
+    button?.click();
+  }
+
+  function hidePinnedMessage() {
+    const panel = state.root?.querySelector(".chatty-pinned");
+    if (!panel) return;
+    state.dismissedPinnedSignature = panel.dataset.signature || state.pinnedSignature;
+    panel.hidden = true;
+  }
+
   function findNativeContainer(shell) {
     for (const selector of SELECTORS.scroll) {
       const node = shell.querySelector(selector);
@@ -505,45 +687,9 @@
       node.querySelector("[data-a-target='chat-line-message-body']") ||
       node.querySelector(".text-fragment")?.parentElement ||
       node;
-    const fragments = [];
-    const walker = document.createTreeWalker(
-      body,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(candidate) {
-          if (
-            candidate.nodeType === Node.ELEMENT_NODE &&
-            candidate !== body &&
-            candidate.matches?.(
-              "[data-a-target='chat-badge'], [data-a-target='chat-message-username']"
-            )
-          ) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          if (
-            candidate.nodeType === Node.TEXT_NODE &&
-            !candidate.nodeValue
-          ) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
-    let current;
-    while ((current = walker.nextNode())) {
-      if (current.nodeType === Node.TEXT_NODE) {
-        fragments.push({ type: "text", value: current.nodeValue });
-      } else if (current instanceof HTMLImageElement) {
-        fragments.push({
-          type: "image",
-          src: current.currentSrc || current.src,
-          alt: current.alt || current.title || "emote"
-        });
-      }
-    }
+    const fragments = collectFragments(body);
     const text = fragments
-      .map((fragment) => fragment.type === "text" ? fragment.value : fragment.alt)
+      .map((fragment) => fragment.value || fragment.alt || "")
       .join("")
       .trim();
     if (!username && !text) return null;
@@ -571,7 +717,8 @@
       badges,
       fragments,
       reward,
-      usernameNode
+      usernameNode,
+      nativeNode: node
     };
   }
 
@@ -582,8 +729,7 @@
       state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
     }
 
-    const wasNearBottom =
-      state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 80;
+    const wasNearBottom = isNearBottom();
     const row = document.createElement("div");
     row.className = "chatty-message";
     row.dataset.messageId = message.id;
@@ -626,44 +772,122 @@
 
     const content = document.createElement("span");
     content.className = "chatty-content";
-    for (const fragment of message.fragments || [{ type: "text", value: message.text }]) {
-      if (fragment.type === "image") {
-        const image = document.createElement("img");
-        image.className = "chatty-emote";
-        image.src = fragment.src;
-        image.alt = fragment.alt;
-        image.title = fragment.alt;
-        image.loading = "lazy";
-        decorateEmote(image, {
-          name: fragment.alt,
-          provider: "Twitch",
-          id: twitchEmoteId(fragment.src)
-        });
-        content.append(image);
-        continue;
-      }
-      for (const token of core.tokenizeEmotes(fragment.value, state.emotes)) {
-        if (token.type === "text") {
-          content.append(document.createTextNode(token.value));
-          continue;
-        }
-        const image = document.createElement("img");
-        image.className = "chatty-emote";
-        image.src = token.emote.url;
-        image.alt = token.value;
-        image.title = token.value;
-        image.loading = "lazy";
-        decorateEmote(image, token.emote);
-        content.append(image);
-      }
-    }
+    appendFragments(content, message.fragments || [{ type: "text", value: message.text }]);
     row.append(content);
+    if (
+      state.isModerator &&
+      message.username &&
+      message.username.toLowerCase() !== findViewerName().toLowerCase()
+    ) {
+      row.append(buildModeratorActions(message));
+    }
     state.list.append(row);
 
     while (state.list.childElementCount > state.settings.maxMessages) {
       state.list.firstElementChild?.remove();
     }
-    if (wasNearBottom) state.list.scrollTop = state.list.scrollHeight;
+    if (wasNearBottom) {
+      state.list.scrollTop = state.list.scrollHeight;
+      state.unreadCount = 0;
+    } else {
+      state.unreadCount += 1;
+    }
+    updateJumpButton();
+  }
+
+  function detectModerator(scope = document) {
+    if (
+      document.querySelector(
+        "[data-a-target='mod-view-button'], [data-test-selector='mod-view-link'], a[href*='/moderator/']"
+      )
+    ) {
+      return true;
+    }
+    const viewer = findViewerName().toLowerCase();
+    if (!viewer) return false;
+    for (const message of scope.querySelectorAll?.(SELECTORS.message) || []) {
+      const username =
+        message.querySelector("[data-a-user]")?.getAttribute("data-a-user") ||
+        message.querySelector("[data-a-target='chat-message-username']")?.textContent ||
+        "";
+      if (username.trim().toLowerCase() !== viewer) continue;
+      const badgeText = Array.from(
+        message.querySelectorAll("img[alt], [data-a-target='chat-badge']")
+      ).map((node) => `${node.getAttribute("alt") || ""} ${node.textContent || ""}`).join(" ");
+      if (/\b(moderator|broadcaster)\b/i.test(badgeText)) return true;
+    }
+    return false;
+  }
+
+  function buildModeratorActions(message) {
+    const actions = document.createElement("span");
+    actions.className = "chatty-mod-actions";
+    const definitions = [
+      ["delete", "Del", "Delete this message"],
+      ["timeout", "10m", `Timeout ${message.username} for 10 minutes`],
+      ["ban", "Ban", `Ban ${message.username}`]
+    ];
+    for (const [action, label, title] of definitions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.modAction = action;
+      button.textContent = label;
+      button.title = title;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        runModeratorAction(action, message);
+      });
+      actions.append(button);
+    }
+    return actions;
+  }
+
+  function runModeratorAction(action, message) {
+    if (!state.isModerator) return;
+    if (action === "ban" && !window.confirm(`Ban ${message.username}?`)) return;
+    const command = action === "delete"
+      ? `/delete ${message.id}`
+      : action === "timeout"
+        ? `/timeout ${message.username} 600`
+        : `/ban ${message.username}`;
+    sendNativeCommand(command);
+  }
+
+  function sendNativeCommand(command) {
+    const input = state.nativeComposer?.querySelector(SELECTORS.nativeInput);
+    const send = state.nativeComposer?.querySelector("[data-a-target='chat-send-button']");
+    const selection = window.getSelection();
+    if (!input || !send || !selection) {
+      setStatus("Moderator command unavailable");
+      return;
+    }
+    const previousDraft = input.textContent || "";
+    input.focus();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const inserted = document.execCommand("insertText", false, command);
+    if (!inserted) {
+      input.textContent = command;
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: command
+      }));
+    }
+    send.click();
+    setStatus(`Moderator action sent for ${command.split(" ")[1] || "message"}`);
+    if (previousDraft) {
+      setTimeout(() => {
+        input.textContent = previousDraft;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: previousDraft
+        }));
+      }, 80);
+    }
   }
 
   function twitchEmoteId(src) {
@@ -679,7 +903,7 @@
     image.dataset.emoteId = emote.id || "";
     image.setAttribute(
       "aria-label",
-      `${image.dataset.emoteName} — ${image.dataset.provider} emote`
+      `${image.dataset.emoteName} - ${image.dataset.provider} emote`
     );
   }
 
@@ -701,13 +925,35 @@
     setStatus(`User card unavailable for ${message.username}`);
   }
 
+  function revealFilteredMessage(node) {
+    const button = Array.from(node.querySelectorAll("button")).find((candidate) => {
+      if (state.revealedFilterButtons.has(candidate)) return false;
+      const label = `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`;
+      return (
+        candidate.matches("[data-a-target*='blocked' i], [data-test-selector*='blocked' i]") ||
+        candidate.closest("[data-a-target*='blocked' i], [data-test-selector*='blocked' i]") ||
+        /\b(show|reveal|unhide)\b.*\bmessage\b/i.test(label)
+      );
+    });
+    if (!button) return false;
+    state.revealedFilterButtons.add(button);
+    button.click();
+    setTimeout(() => {
+      state.processedNodes.delete(node);
+      ingest(node);
+    }, 0);
+    return true;
+  }
+
   function ingest(scope = document) {
     for (const node of scope.querySelectorAll?.(SELECTORS.message) || []) {
       if (state.processedNodes.has(node)) continue;
+      if (revealFilteredMessage(node)) continue;
       state.processedNodes.add(node);
       appendMessage(readMessage(node));
     }
     if (scope.matches?.(SELECTORS.message) && !state.processedNodes.has(scope)) {
+      if (revealFilteredMessage(scope)) return;
       state.processedNodes.add(scope);
       appendMessage(readMessage(scope));
     }
@@ -716,6 +962,8 @@
   function observeNative(container) {
     state.observer?.disconnect();
     state.nativeContainer = container;
+    state.isModerator = detectModerator(container);
+    state.root?.classList.toggle("chatty-is-moderator", state.isModerator);
     ingest(container);
     state.observer = new MutationObserver((records) => {
       for (const record of records) {
@@ -765,6 +1013,11 @@
     state.seen.clear();
     state.processedNodes = new WeakSet();
     state.claimedPointButtons = new WeakSet();
+    state.revealedFilterButtons = new WeakSet();
+    state.unreadCount = 0;
+    state.isModerator = false;
+    state.pinnedSignature = "";
+    state.dismissedPinnedSignature = "";
     document.documentElement.classList.remove("chatty-active");
   }
 
@@ -807,6 +1060,7 @@
       if (state.root && !state.nativeComposer?.isConnected) {
         syncNativeComposer(state.root.parentElement);
       }
+      if (state.root) syncPinnedMessage();
       schedulePointsScan();
     });
     pageObserver.observe(document.documentElement, { childList: true, subtree: true });

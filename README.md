@@ -18,6 +18,11 @@ stream with a dense, Chatterino-inspired view.
 - Custom highlights by username or phrase
 - Automatic mention highlighting
 - Click a username to open Twitch's native user card
+- Clickable, highlighted links that open safely in a new tab
+- Automatically revealed messages hidden by Twitch's local chat filter
+- A jump-to-latest control with an unread-message count
+- A compact pinned-message panel with attribution, links, and native expansion
+- Moderator-only delete, 10-minute timeout, and ban quick actions
 - Twitch's real authenticated Slate composer remains visible and fully functional
 - Channel-point reward messages receive a distinct style
 - Twitch's native bottom-left points balance is always visible and opens the

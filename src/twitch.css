@@ -129,6 +129,100 @@
   scrollbar-width: thin;
 }
 
+.chatty-pinned {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 9px 10px 10px 12px;
+  background: #17151d;
+  border-bottom: 1px solid #37313f;
+  box-shadow: inset 3px 0 0 #a970ff;
+}
+
+.chatty-pinned[hidden] {
+  display: none;
+}
+
+.chatty-pinned-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 5px;
+}
+
+.chatty-pinned-header > strong {
+  color: #cbb8ff;
+  font-size: 10px;
+  letter-spacing: .08em;
+}
+
+.chatty-pinned-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: #92919a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatty-pinned-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.chatty-pinned-actions button {
+  padding: 2px 6px;
+  color: #bdbbc4;
+  background: transparent;
+  border: 1px solid #45414c;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.chatty-pinned-actions button:hover {
+  color: #fff;
+  background: #302b37;
+  border-color: #635972;
+}
+
+.chatty-pinned-content {
+  max-height: 55px;
+  overflow: hidden;
+  color: #e1dfe5;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chatty-jump {
+  position: absolute;
+  z-index: 30;
+  right: 50%;
+  bottom: 10px;
+  padding: 6px 10px;
+  color: #f4f3f5;
+  background: #2b2730;
+  border: 1px solid #5b5364;
+  border-radius: 999px;
+  box-shadow: 0 5px 18px rgb(0 0 0 / 42%);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transform: translateX(50%);
+}
+
+.chatty-jump:hover {
+  background: #3a3441;
+  border-color: #83758f;
+}
+
+.chatty-jump[hidden] {
+  display: none;
+}
+
 .chatty-message {
   position: relative;
   padding: 3px 8px 3px 10px;
@@ -210,6 +304,63 @@
 
 .chatty-name:hover {
   text-decoration: underline;
+  text-shadow:
+    0 0 4px rgb(255 255 255 / 58%),
+    0 0 9px rgb(255 255 255 / 24%);
+}
+
+.chatty-link {
+  color: #8ab4ff;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: rgb(138 180 255 / 58%);
+  text-underline-offset: 2px;
+}
+
+.chatty-link:visited {
+  color: #c4a7ff;
+}
+
+.chatty-link:hover {
+  color: #d7e5ff;
+  text-decoration-color: currentColor;
+}
+
+.chatty-mod-actions {
+  display: inline-flex;
+  gap: 3px;
+  margin-left: 7px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+  vertical-align: 1px;
+}
+
+.chatty-message:hover .chatty-mod-actions,
+.chatty-mod-actions:focus-within {
+  opacity: 1;
+}
+
+.chatty-mod-actions button {
+  padding: 1px 4px;
+  color: #b9b6bf;
+  background: #28272c;
+  border: 1px solid #444149;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.chatty-mod-actions button:hover {
+  color: #fff;
+  background: #453849;
+  border-color: #765d7d;
+}
+
+.chatty-mod-actions [data-mod-action="ban"]:hover {
+  color: #fff;
+  background: #7c2430;
+  border-color: #b74351;
 }
 
 .chatty-emote {

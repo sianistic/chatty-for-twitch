@@ -10,13 +10,21 @@ const coreSource = fs.readFileSync(path.join(__dirname, "../src/core.js"), "utf8
 const contentSource = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8");
 
 async function createFixture(options = {}) {
+  const viewerName = options.viewerName || "viewer";
   const dom = new JSDOM(`<!doctype html>
     <html><body>
+      <button data-a-target="user-menu-toggle"><img alt="${viewerName}"></button>
       <div class="stream-chat">
         <div class="stream-chat-header">STREAM CHAT</div>
         <section data-test-selector="chat-room-component-layout">
           <div class="chat-room__content">
-            <div class="native-pinned">Pinned content</div>
+            <div class="pinned-chat__highlight-card">
+              <div class="pinned-chat__pinned-by">Pinned by modJane</div>
+              <p class="pinned-chat__message">
+                Read the <a href="https://example.com/rules">channel rules</a>
+              </p>
+              <button aria-label="Expand">Expand</button>
+            </div>
             <div data-a-target="chat-scroller">
               <div class="chat-line__message" data-id="message-1">
                 <img
@@ -31,11 +39,21 @@ async function createFixture(options = {}) {
                   style="color: rgb(255, 0, 100)"
                 >alice</span>
                 <span data-a-target="chat-line-message-body">
-                  hello
+                  hello <a href="https://example.com/news">example.com/news</a>
                   <img
                     alt="Kappa"
                     src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"
                   >
+                </span>
+              </div>
+              <div class="chat-line__message" data-id="message-filtered">
+                <span
+                  class="chat-author__display-name"
+                  data-a-target="chat-message-username"
+                  data-a-user="bob"
+                >bob</span>
+                <span data-a-target="chat-line-message-body">
+                  <button data-a-target="chat-message-blocked">Show message</button>
                 </span>
               </div>
             </div>
@@ -108,6 +126,16 @@ async function createFixture(options = {}) {
       .querySelector("[aria-label='Claim Bonus']")
       .addEventListener("click", options.onClaim);
   }
+  window.document
+    .querySelector("[data-a-target='chat-message-blocked']")
+    .addEventListener("click", (event) => {
+      const body = event.currentTarget.parentElement;
+      event.currentTarget.remove();
+      const revealed = window.document.createElement("span");
+      revealed.setAttribute("data-a-target", "chat-message-text");
+      revealed.textContent = "this damn filter is visible";
+      body.append(revealed);
+    });
   window.eval(coreSource);
   window.eval(contentSource);
   await new Promise((resolve) => window.setTimeout(resolve, 25));
@@ -286,4 +314,74 @@ test("auto-claim clicks an available bonus once", async () => {
     onClaim: () => { claims += 1; }
   });
   assert.equal(claims, 1);
+});
+
+test("message links preserve their URL and remain clickable", async () => {
+  const dom = await createFixture();
+  const link = dom.window.document.querySelector(
+    ".chatty-message[data-message-id='message-1'] .chatty-link"
+  );
+  assert.ok(link);
+  assert.equal(link.href, "https://example.com/news");
+  assert.equal(link.target, "_blank");
+  assert.match(link.rel, /noopener/);
+});
+
+test("filtered messages are automatically revealed and mirrored", async () => {
+  const dom = await createFixture();
+  const filtered = dom.window.document.querySelector(
+    ".chatty-message[data-message-id='message-filtered'] .chatty-content"
+  );
+  assert.ok(filtered);
+  assert.match(filtered.textContent, /damn filter is visible/);
+  assert.doesNotMatch(filtered.textContent, /Show message/);
+});
+
+test("jump-to-latest control restores the bottom position", async () => {
+  const dom = await createFixture();
+  const { document, Event } = dom.window;
+  const list = document.querySelector(".chatty-list");
+  Object.defineProperties(list, {
+    scrollHeight: { configurable: true, value: 1000 },
+    clientHeight: { configurable: true, value: 200 },
+    scrollTop: { configurable: true, writable: true, value: 100 }
+  });
+  list.dispatchEvent(new Event("scroll"));
+  const jump = document.querySelector(".chatty-jump");
+  assert.equal(jump.hidden, false);
+  jump.click();
+  assert.equal(list.scrollTop, 1000);
+  assert.equal(jump.hidden, true);
+});
+
+test("pinned message UI includes attribution, content, and links", async () => {
+  const dom = await createFixture();
+  const pinned = dom.window.document.querySelector(".chatty-pinned");
+  assert.ok(pinned);
+  assert.equal(pinned.hidden, false);
+  assert.match(pinned.querySelector(".chatty-pinned-meta").textContent, /modJane/);
+  assert.match(pinned.querySelector(".chatty-pinned-content").textContent, /channel rules/);
+  assert.equal(
+    pinned.querySelector(".chatty-link").href,
+    "https://example.com/rules"
+  );
+});
+
+test("moderators receive native-command quick actions", async () => {
+  const dom = await createFixture({ viewerName: "alice" });
+  const { document } = dom.window;
+  let sends = 0;
+  document
+    .querySelector("[data-a-target='chat-send-button']")
+    .addEventListener("click", () => { sends += 1; });
+  const timeout = document.querySelector(
+    ".chatty-message[data-message-id='message-filtered'] [data-mod-action='timeout']"
+  );
+  assert.ok(timeout);
+  timeout.click();
+  assert.equal(
+    document.querySelector("[data-a-target='chat-input']").textContent,
+    "/timeout bob 600"
+  );
+  assert.equal(sends, 1);
 });
