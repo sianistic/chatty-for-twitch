@@ -467,8 +467,11 @@
   }
 
   function schedulePointsScan() {
-    clearTimeout(state.pointsScanTimer);
-    state.pointsScanTimer = setTimeout(scanChannelPoints, 100);
+    if (state.pointsScanTimer) return;
+    state.pointsScanTimer = setTimeout(() => {
+      state.pointsScanTimer = 0;
+      scanChannelPoints();
+    }, 250);
   }
 
   function populateSettingsForm() {
@@ -646,6 +649,19 @@
     content.replaceChildren();
     appendFragments(content, pinned.fragments);
     panel.hidden = false;
+  }
+
+  function mutationsTouchPinned(records) {
+    const nodeTouchesPinned = (node) =>
+      node?.nodeType === Node.ELEMENT_NODE &&
+      (
+        node.matches?.(SELECTORS.pinned) ||
+        node.querySelector?.(SELECTORS.pinned)
+      );
+    return records.some((record) => {
+      if (record.target?.closest?.(SELECTORS.pinned)) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(nodeTouchesPinned);
+    });
   }
 
   function openNativePinned() {
@@ -1050,7 +1066,7 @@
   async function boot() {
     const stored = await chrome.storage.sync.get("chattySettings");
     state.settings = core.sanitizeSettings(stored.chattySettings);
-    const pageObserver = new MutationObserver(() => {
+    const pageObserver = new MutationObserver((records) => {
       if (window.location.href !== state.route) {
         state.route = window.location.href;
         scheduleMount();
@@ -1060,7 +1076,7 @@
       if (state.root && !state.nativeComposer?.isConnected) {
         syncNativeComposer(state.root.parentElement);
       }
-      if (state.root) syncPinnedMessage();
+      if (state.root && mutationsTouchPinned(records)) syncPinnedMessage();
       schedulePointsScan();
     });
     pageObserver.observe(document.documentElement, { childList: true, subtree: true });

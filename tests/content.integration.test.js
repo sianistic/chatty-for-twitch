@@ -83,6 +83,21 @@ async function createFixture(options = {}) {
   });
 
   const { window } = dom;
+  const nativeDocumentQuerySelectorAll =
+    window.document.querySelectorAll.bind(window.document);
+  let pinnedQueryCount = 0;
+  window.document.querySelectorAll = (selector) => {
+    if (selector === ".pinned-chat__highlight-card") pinnedQueryCount += 1;
+    return nativeDocumentQuerySelectorAll(selector);
+  };
+  window.__chattyTestMetrics = {
+    get pinnedQueryCount() {
+      return pinnedQueryCount;
+    },
+    reset() {
+      pinnedQueryCount = 0;
+    }
+  };
   window.chrome = {
     runtime: {
       sendMessage: async () => ({
@@ -384,4 +399,28 @@ test("moderators receive native-command quick actions", async () => {
     "/timeout bob 600"
   );
   assert.equal(sends, 1);
+});
+
+test("ordinary chat mutations do not rescan the whole document for pinned content", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  dom.window.__chattyTestMetrics.reset();
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+
+  for (let index = 0; index < 30; index += 1) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = `burst-${index}`;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="burst">burst</span>
+      <span data-a-target="chat-line-message-body">message ${index}</span>
+    `;
+    scroller.append(message);
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+  }
+
+  assert.ok(
+    dom.window.__chattyTestMetrics.pinnedQueryCount <= 2,
+    `expected at most 2 pinned scans, received ${dom.window.__chattyTestMetrics.pinnedQueryCount}`
+  );
 });
