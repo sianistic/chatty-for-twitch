@@ -1,0 +1,50 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, system-ui, sans-serif;
+}
+
+body {
+  width: 270px;
+  margin: 0;
+  padding: 14px;
+  color: #efeff1;
+  background: #0e0e10;
+  font-size: 13px;
+}
+
+header,
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+header {
+  justify-content: flex-start;
+  margin-bottom: 14px;
+  font-size: 15px;
+}
+
+header img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+}
+
+.switch-row {
+  padding: 10px;
+  background: #18181b;
+  border: 1px solid #303037;
+  border-radius: 6px;
+}
+
+p {
+  margin: 12px 2px 0;
+  line-height: 1.45;
+}
+
+.muted {
+  color: #9b9ba5;
+  font-size: 12px;
+}
