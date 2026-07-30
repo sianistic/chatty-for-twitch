@@ -228,6 +228,9 @@
   padding: 3px 8px 3px 10px;
   overflow-wrap: anywhere;
   line-height: 1.35;
+  contain: layout paint style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 24px;
 }
 
 .chatty-message:hover {

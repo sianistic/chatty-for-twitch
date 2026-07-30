@@ -424,3 +424,32 @@ test("ordinary chat mutations do not rescan the whole document for pinned conten
     `expected at most 2 pinned scans, received ${dom.window.__chattyTestMetrics.pinnedQueryCount}`
   );
 });
+
+test("busy chat keeps the mirrored DOM within the playback-safe message limit", async () => {
+  const dom = await createFixture({ settings: { maxMessages: 2000 } });
+  const { document } = dom.window;
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const burst = document.createElement("div");
+
+  for (let index = 0; index < 400; index += 1) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = `performance-${index}`;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="performance">performance</span>
+      <span data-a-target="chat-line-message-body">
+        <img src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0" alt="Kappa">
+        message ${index}
+      </span>
+    `;
+    burst.append(message);
+  }
+
+  scroller.append(burst);
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  assert.ok(
+    document.querySelectorAll(".chatty-message").length <= 200,
+    "mirrored chat should not retain enough animated content to pressure video playback"
+  );
+});

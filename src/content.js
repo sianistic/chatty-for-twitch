@@ -594,6 +594,8 @@
         image.alt = fragment.alt;
         image.title = fragment.alt;
         image.loading = "lazy";
+        image.decoding = "async";
+        image.fetchPriority = "low";
         decorateEmote(image, {
           name: fragment.alt,
           provider: "Twitch",
@@ -613,6 +615,8 @@
         image.alt = token.value;
         image.title = token.value;
         image.loading = "lazy";
+        image.decoding = "async";
+        image.fetchPriority = "low";
         decorateEmote(image, token.emote);
         container.append(image);
       }
@@ -651,16 +655,16 @@
     panel.hidden = false;
   }
 
-  function mutationsTouchPinned(records) {
-    const nodeTouchesPinned = (node) =>
+  function mutationsTouchSelector(records, selector) {
+    const nodeTouchesSelector = (node) =>
       node?.nodeType === Node.ELEMENT_NODE &&
       (
-        node.matches?.(SELECTORS.pinned) ||
-        node.querySelector?.(SELECTORS.pinned)
+        node.matches?.(selector) ||
+        node.querySelector?.(selector)
       );
     return records.some((record) => {
-      if (record.target?.closest?.(SELECTORS.pinned)) return true;
-      return [...record.addedNodes, ...record.removedNodes].some(nodeTouchesPinned);
+      if (record.target?.closest?.(selector)) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(nodeTouchesSelector);
     });
   }
 
@@ -769,6 +773,9 @@
       image.src = badge.src;
       image.alt = badge.alt;
       image.title = badge.alt;
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.fetchPriority = "low";
       image.tabIndex = 0;
       image.dataset.emoteName = badge.alt || "Twitch badge";
       image.dataset.provider = "Twitch badge";
@@ -1076,8 +1083,12 @@
       if (state.root && !state.nativeComposer?.isConnected) {
         syncNativeComposer(state.root.parentElement);
       }
-      if (state.root && mutationsTouchPinned(records)) syncPinnedMessage();
-      schedulePointsScan();
+      if (state.root && mutationsTouchSelector(records, SELECTORS.pinned)) {
+        syncPinnedMessage();
+      }
+      if (state.root && mutationsTouchSelector(records, SELECTORS.pointsClaim)) {
+        schedulePointsScan();
+      }
     });
     pageObserver.observe(document.documentElement, { childList: true, subtree: true });
     chrome.storage.onChanged.addListener((changes, area) => {
