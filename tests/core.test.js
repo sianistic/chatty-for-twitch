@@ -12,8 +12,8 @@ test("settings are bounded and lists are normalized", () => {
     highlightColor: "red"
   });
   assert.equal(value.fontSize, 22);
-  assert.equal(value.maxMessages, 100);
-  assert.equal(core.sanitizeSettings({ maxMessages: 9999 }).maxMessages, 200);
+  assert.equal(value.maxMessages, 500);
+  assert.equal(core.sanitizeSettings({ maxMessages: 9999 }).maxMessages, 5000);
   assert.deepEqual(value.highlightUsers, ["Alice", "bob", "@Carol"]);
   assert.equal(value.highlightColor, core.DEFAULT_SETTINGS.highlightColor);
 });

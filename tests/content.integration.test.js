@@ -425,9 +425,9 @@ test("ordinary chat mutations do not rescan the whole document for pinned conten
   );
 });
 
-test("busy chat keeps the mirrored DOM within the playback-safe message limit", async () => {
+test("busy chat virtualizes history and renders older messages while scrolling", async () => {
   const dom = await createFixture({ settings: { maxMessages: 2000 } });
-  const { document } = dom.window;
+  const { document, Event } = dom.window;
   const scroller = document.querySelector("[data-a-target='chat-scroller']");
   const burst = document.createElement("div");
 
@@ -449,7 +449,18 @@ test("busy chat keeps the mirrored DOM within the playback-safe message limit", 
   await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
 
   assert.ok(
-    document.querySelectorAll(".chatty-message").length <= 200,
-    "mirrored chat should not retain enough animated content to pressure video playback"
+    document.querySelectorAll(".chatty-message").length <= 80,
+    "only the viewport and a small overscan buffer should exist in the live DOM"
+  );
+  assert.ok(document.querySelector("[data-message-id='performance-399']"));
+
+  const list = document.querySelector(".chatty-list");
+  list.scrollTop = 0;
+  list.dispatchEvent(new Event("scroll"));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  assert.ok(
+    document.querySelector("[data-message-id='performance-0']"),
+    "scrolling upward should render messages retained in the virtual history"
   );
 });

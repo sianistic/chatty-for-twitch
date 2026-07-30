@@ -2,9 +2,22 @@
   "use strict";
 
   const core = globalThis.ChattyCore;
+  const VIRTUAL_OVERSCAN = 10;
+  const VIRTUAL_ROW_HEIGHT = 28;
+  const VIRTUAL_VIEWPORT_FALLBACK = 480;
   const state = {
     root: null,
     list: null,
+    virtualWindow: null,
+    virtualTop: null,
+    virtualBottom: null,
+    messages: [],
+    virtualStart: -1,
+    virtualEnd: -1,
+    virtualRowHeight: VIRTUAL_ROW_HEIGHT,
+    virtualRenderFrame: 0,
+    virtualDirty: false,
+    followLatest: true,
     settings: core.sanitizeSettings({}),
     emotes: new Map(),
     channel: "",
@@ -122,7 +135,11 @@
         </div>
         <div class="chatty-pinned-content"></div>
       </aside>
-      <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions">
+        <div class="chatty-virtual-spacer chatty-virtual-top" aria-hidden="true"></div>
+        <div class="chatty-virtual-window"></div>
+        <div class="chatty-virtual-spacer chatty-virtual-bottom" aria-hidden="true"></div>
+      </div>
       <button type="button" class="chatty-jump" hidden>Jump to latest</button>
       <div class="chatty-autocomplete" role="listbox" aria-label="7TV emotes" hidden></div>
       <div class="chatty-emote-card" role="tooltip" hidden>
@@ -182,7 +199,10 @@
     host.append(panel);
     state.root = panel;
     state.list = panel.querySelector(".chatty-list");
-    state.list.addEventListener("scroll", updateJumpButton, { passive: true });
+    state.virtualWindow = panel.querySelector(".chatty-virtual-window");
+    state.virtualTop = panel.querySelector(".chatty-virtual-top");
+    state.virtualBottom = panel.querySelector(".chatty-virtual-bottom");
+    state.list.addEventListener("scroll", handleVirtualScroll, { passive: true });
     panel.querySelector(".chatty-jump").addEventListener("click", jumpToLatest);
     panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
     panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
@@ -502,6 +522,10 @@
     state.root.style.setProperty("--chatty-font-size", `${state.settings.fontSize}px`);
     state.root.classList.toggle("chatty-roomy", !state.settings.compact);
     state.root.classList.toggle("chatty-no-time", !state.settings.timestamps);
+    state.virtualRowHeight = state.settings.compact ? VIRTUAL_ROW_HEIGHT : 34;
+    state.virtualDirty = true;
+    trimMessageHistory();
+    scheduleVirtualRender();
   }
 
   function setStatus(text) {
@@ -509,9 +533,24 @@
     if (node) node.textContent = text;
   }
 
+  function virtualViewportHeight() {
+    return state.list?.clientHeight || VIRTUAL_VIEWPORT_FALLBACK;
+  }
+
+  function virtualScrollHeight() {
+    return state.messages.length * state.virtualRowHeight;
+  }
+
   function isNearBottom() {
     if (!state.list) return true;
-    return state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 80;
+    const height = Math.max(state.list.scrollHeight, virtualScrollHeight());
+    return height - state.list.scrollTop - virtualViewportHeight() < 80;
+  }
+
+  function handleVirtualScroll() {
+    state.followLatest = isNearBottom();
+    scheduleVirtualRender();
+    updateJumpButton();
   }
 
   function updateJumpButton() {
@@ -527,7 +566,12 @@
 
   function jumpToLatest() {
     if (!state.list) return;
-    state.list.scrollTop = state.list.scrollHeight;
+    state.followLatest = true;
+    renderVirtualWindow();
+    state.list.scrollTop = Math.max(
+      state.list.scrollHeight,
+      virtualScrollHeight()
+    );
     state.unreadCount = 0;
     updateJumpButton();
   }
@@ -742,14 +786,7 @@
     };
   }
 
-  function appendMessage(message) {
-    if (!message || state.seen.has(message.id)) return;
-    state.seen.add(message.id);
-    if (state.seen.size > state.settings.maxMessages * 2) {
-      state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
-    }
-
-    const wasNearBottom = isNearBottom();
+  function createMessageRow(message) {
     const row = document.createElement("div");
     row.className = "chatty-message";
     row.dataset.messageId = message.id;
@@ -762,7 +799,10 @@
 
     const time = document.createElement("time");
     time.className = "chatty-time";
-    time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    time.textContent = new Date(message.timestamp).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
     row.append(time);
 
     const badges = document.createElement("span");
@@ -804,18 +844,100 @@
     ) {
       row.append(buildModeratorActions(message));
     }
-    state.list.append(row);
+    return row;
+  }
 
-    while (state.list.childElementCount > state.settings.maxMessages) {
-      state.list.firstElementChild?.remove();
+  function trimMessageHistory() {
+    const excess = state.messages.length - state.settings.maxMessages;
+    if (excess <= 0) return;
+    state.messages.splice(0, excess);
+    if (!state.followLatest && state.list) {
+      state.list.scrollTop = Math.max(
+        0,
+        state.list.scrollTop - excess * state.virtualRowHeight
+      );
     }
-    if (wasNearBottom) {
-      state.list.scrollTop = state.list.scrollHeight;
+  }
+
+  function renderVirtualWindow() {
+    if (!state.list || !state.virtualWindow) return;
+    const total = state.messages.length;
+    const viewport = virtualViewportHeight();
+    const visibleRows = Math.ceil(viewport / state.virtualRowHeight);
+    const windowSize = visibleRows + VIRTUAL_OVERSCAN * 2;
+    const start = state.followLatest
+      ? Math.max(0, total - windowSize)
+      : Math.max(
+        0,
+        Math.min(
+          Math.floor(state.list.scrollTop / state.virtualRowHeight) - VIRTUAL_OVERSCAN,
+          Math.max(0, total - windowSize)
+        )
+      );
+    const end = Math.min(total, start + windowSize);
+
+    if (
+      !state.virtualDirty &&
+      start === state.virtualStart &&
+      end === state.virtualEnd
+    ) {
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (let index = start; index < end; index += 1) {
+      fragment.append(createMessageRow(state.messages[index]));
+    }
+    state.virtualWindow.replaceChildren(fragment);
+    state.virtualTop.style.height = `${start * state.virtualRowHeight}px`;
+    state.virtualBottom.style.height = `${(total - end) * state.virtualRowHeight}px`;
+    state.virtualStart = start;
+    state.virtualEnd = end;
+    state.virtualDirty = false;
+
+    const renderedHeight = state.virtualWindow.scrollHeight;
+    if (renderedHeight > 0 && end > start) {
+      const measured = renderedHeight / (end - start);
+      state.virtualRowHeight = Math.max(20, Math.min(80, measured));
+    }
+
+    if (state.followLatest) {
+      state.list.scrollTop = Math.max(
+        state.list.scrollHeight,
+        virtualScrollHeight()
+      );
       state.unreadCount = 0;
-    } else {
-      state.unreadCount += 1;
     }
     updateJumpButton();
+  }
+
+  function scheduleVirtualRender() {
+    if (state.virtualRenderFrame) return;
+    state.virtualRenderFrame = 1;
+    queueMicrotask(() => {
+      state.virtualRenderFrame = 0;
+      renderVirtualWindow();
+    });
+  }
+
+  function appendMessage(message) {
+    if (!message || state.seen.has(message.id)) return;
+    state.seen.add(message.id);
+    if (state.seen.size > state.settings.maxMessages * 2) {
+      state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
+    }
+
+    state.messages.push({
+      ...message,
+      timestamp: message.timestamp || Date.now(),
+      usernameNode: null,
+      nativeNode: null
+    });
+    trimMessageHistory();
+    if (state.followLatest) state.unreadCount = 0;
+    else state.unreadCount += 1;
+    state.virtualDirty = true;
+    scheduleVirtualRender();
   }
 
   function detectModerator(scope = document) {
@@ -933,9 +1055,13 @@
   function openUserCard(message) {
     let usernameNode = message.usernameNode;
     if (!usernameNode?.isConnected) {
-      const escaped = CSS.escape(message.username.toLowerCase());
-      const nodes = state.nativeContainer?.querySelectorAll(`[data-a-user="${escaped}"]`);
-      usernameNode = nodes?.[nodes.length - 1];
+      const username = message.username.toLowerCase();
+      const nodes = Array.from(
+        state.nativeContainer?.querySelectorAll("[data-a-user]") || []
+      ).filter((node) =>
+        node.getAttribute("data-a-user")?.toLowerCase() === username
+      );
+      usernameNode = nodes[nodes.length - 1];
     }
     if (usernameNode) {
       usernameNode.dispatchEvent(new MouseEvent("click", {
@@ -1009,13 +1135,8 @@
       response.data.global,
       response.data.channelSet
     ]);
-    if (state.nativeContainer && state.list) {
-      state.list.replaceChildren();
-      state.seen.clear();
-      state.processedNodes = new WeakSet();
-      ingest(state.nativeContainer);
-      state.list.scrollTop = state.list.scrollHeight;
-    }
+    state.virtualDirty = true;
+    scheduleVirtualRender();
     setStatus(`${state.emotes.size} emotes`);
   }
 
@@ -1029,6 +1150,15 @@
     document.querySelector(".chatty-host")?.classList.remove("chatty-host");
     state.root = null;
     state.list = null;
+    state.virtualWindow = null;
+    state.virtualTop = null;
+    state.virtualBottom = null;
+    state.messages = [];
+    state.virtualStart = -1;
+    state.virtualEnd = -1;
+    state.virtualRenderFrame = 0;
+    state.virtualDirty = false;
+    state.followLatest = true;
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;
