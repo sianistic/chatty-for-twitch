@@ -330,6 +330,11 @@ test("badge hover shows the Twitch badge name and provider", async () => {
     "Moderator, examplechannel"
   );
   assert.equal(card.querySelector(".chatty-emote-provider").textContent, "Twitch badge");
+  assert.match(
+    card.querySelector(".chatty-emote-preview").src,
+    /\/badges\/v1\/moderator\/1\/3$/,
+    "badge hover should use Twitch's highest-resolution badge asset"
+  );
 });
 
 test("auto-claim clicks an available bonus once", async () => {

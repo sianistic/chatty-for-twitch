@@ -425,12 +425,45 @@
     state.autocompleteIndex = 0;
   }
 
+  function largestImageCandidate(srcset) {
+    return String(srcset || "")
+      .split(",")
+      .map((candidate) => {
+        const [url, descriptor = "1x"] = candidate.trim().split(/\s+/);
+        return {
+          url,
+          score: Number.parseFloat(descriptor) || 1
+        };
+      })
+      .filter((candidate) => candidate.url)
+      .sort((left, right) => right.score - left.score)[0]?.url || "";
+  }
+
+  function highResolutionBadgeUrl(image) {
+    const source =
+      largestImageCandidate(image.srcset) ||
+      image.currentSrc ||
+      image.src;
+    try {
+      const url = new URL(source, window.location.href);
+      if (
+        /(^|\.)jtvnw\.net$/i.test(url.hostname) &&
+        url.pathname.startsWith("/badges/v1/")
+      ) {
+        url.pathname = url.pathname.replace(/\/(?:1|2|3)$/, "/3");
+      }
+      return url.href;
+    } catch {
+      return source;
+    }
+  }
+
   function showEmoteCard(event) {
     const emote = event.target.closest?.(".chatty-emote, .chatty-badge");
     if (!emote || !state.root?.contains(emote)) return;
     const card = state.root.querySelector(".chatty-emote-card");
     const preview = card.querySelector(".chatty-emote-preview");
-    preview.src = emote.src;
+    preview.src = emote.dataset.previewSrc || emote.src;
     preview.alt = emote.alt;
     card.querySelector(".chatty-emote-name").textContent =
       emote.dataset.emoteName || emote.alt || "Emote";
@@ -780,7 +813,11 @@
       "#adadb8";
     const badges = Array.from(
       node.querySelectorAll("img.chat-badge, [data-a-target='chat-badge'] img, img[alt$='Badge']")
-    ).map((image) => ({ src: image.currentSrc || image.src, alt: image.alt || "badge" }));
+    ).map((image) => ({
+      src: image.currentSrc || image.src,
+      previewSrc: highResolutionBadgeUrl(image),
+      alt: image.alt || "badge"
+    }));
     const reward = Boolean(
       node.querySelector("[data-test-selector*='reward'], [data-a-target*='reward']") ||
       node.closest("[data-test-selector*='reward']")
@@ -831,6 +868,7 @@
       image.tabIndex = 0;
       image.dataset.emoteName = badge.alt || "Twitch badge";
       image.dataset.provider = "Twitch badge";
+      image.dataset.previewSrc = badge.previewSrc || badge.src;
       image.setAttribute("aria-label", `${badge.alt || "Twitch"} badge`);
       badges.append(image);
     }
