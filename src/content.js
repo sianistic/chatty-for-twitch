@@ -19,9 +19,11 @@
     virtualDirty: false,
     followLatest: true,
     settings: core.sanitizeSettings({}),
+    viewerName: "",
     emotes: new Map(),
     channel: "",
     seen: new Set(),
+    recentSelfMessages: new Map(),
     processedNodes: new WeakSet(),
     messageSequence: 0,
     observer: null,
@@ -961,9 +963,31 @@
     });
   }
 
+  function isDuplicateSelfEcho(message) {
+    const viewer =
+      state.viewerName ||
+      findViewerName().trim().toLowerCase();
+    if (viewer) state.viewerName = viewer;
+    const username = String(message.username || "").trim().toLowerCase();
+    if (!viewer || username !== viewer) return false;
+
+    const text = String(message.text || "").replace(/\s+/g, " ").trim();
+    if (!text) return false;
+    const fingerprint = `${username}\n${text}`;
+    const now = Date.now();
+    const previous = state.recentSelfMessages.get(fingerprint);
+
+    for (const [key, timestamp] of state.recentSelfMessages) {
+      if (now - timestamp > 10000) state.recentSelfMessages.delete(key);
+    }
+    state.recentSelfMessages.set(fingerprint, now);
+    return previous !== undefined && now - previous < 2500;
+  }
+
   function appendMessage(message) {
     if (!message || state.seen.has(message.id)) return;
     state.seen.add(message.id);
+    if (isDuplicateSelfEcho(message)) return;
     if (state.seen.size > state.settings.maxMessages * 2) {
       state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
     }
@@ -1200,11 +1224,13 @@
     state.virtualRenderFrame = 0;
     state.virtualDirty = false;
     state.followLatest = true;
+    state.viewerName = "";
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;
     state.nativeComposerResizeObserver = null;
     state.seen.clear();
+    state.recentSelfMessages.clear();
     state.processedNodes = new WeakSet();
     state.claimedPointButtons = new WeakSet();
     state.revealedFilterButtons = new WeakSet();

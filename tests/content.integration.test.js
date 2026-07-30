@@ -216,6 +216,28 @@ test("Chatty exposes Twitch's real Slate composer instead of a synthetic bridge"
   );
 });
 
+test("the current viewer's optimistic echo is not rendered twice", async () => {
+  const dom = await createFixture({ viewerName: "alice" });
+  const { document } = dom.window;
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+
+  for (const id of ["echo-local", "echo-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">sent once</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "sent once");
+  assert.equal(copies.length, 1);
+});
+
 test("past messages are hydrated after the delayed 7TV emote set loads", async () => {
   const dom = await createFixture({
     emotePayload: {
