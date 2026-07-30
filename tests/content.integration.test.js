@@ -217,9 +217,12 @@ test("Chatty exposes Twitch's real Slate composer instead of a synthetic bridge"
 });
 
 test("the current viewer's optimistic echo is not rendered twice", async () => {
-  const dom = await createFixture({ viewerName: "alice" });
-  const { document } = dom.window;
+  const dom = await createFixture({ viewerName: "User Avatar" });
+  const { document, KeyboardEvent } = dom.window;
   const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const input = document.querySelector("[data-a-target='chat-input'][contenteditable='true']");
+  input.textContent = "sent once";
+  document.querySelector("[data-a-target='chat-send-button']").click();
 
   for (const id of ["echo-local", "echo-server"]) {
     const message = document.createElement("div");
@@ -236,6 +239,28 @@ test("the current viewer's optimistic echo is not rendered twice", async () => {
   const copies = Array.from(document.querySelectorAll(".chatty-message"))
     .filter((message) => message.querySelector(".chatty-content")?.textContent === "sent once");
   assert.equal(copies.length, 1);
+
+  input.textContent = "entered once";
+  input.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    cancelable: true
+  }));
+  for (const id of ["enter-local", "enter-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">entered once</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const enteredCopies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "entered once");
+  assert.equal(enteredCopies.length, 1);
 });
 
 test("past messages are hydrated after the delayed 7TV emote set loads", async () => {

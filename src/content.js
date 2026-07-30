@@ -19,11 +19,10 @@
     virtualDirty: false,
     followLatest: true,
     settings: core.sanitizeSettings({}),
-    viewerName: "",
     emotes: new Map(),
     channel: "",
     seen: new Set(),
-    recentSelfMessages: new Map(),
+    outgoingDrafts: [],
     processedNodes: new WeakSet(),
     messageSequence: 0,
     observer: null,
@@ -260,6 +259,21 @@
       capture: true,
       signal: state.nativeComposerAbort.signal
     });
+    input?.addEventListener("keydown", captureOutgoingEnter, {
+      capture: true,
+      signal: state.nativeComposerAbort.signal
+    });
+    (
+      composer.querySelector("[data-a-target='chat-send-button']") ||
+      document.querySelector("[data-a-target='chat-send-button']")
+    )?.addEventListener(
+      "click",
+      () => rememberOutgoingDraft(composerDraftText(input)),
+      {
+        capture: true,
+        signal: state.nativeComposerAbort.signal
+      }
+    );
 
     if (typeof ResizeObserver === "function") {
       state.nativeComposerResizeObserver = new ResizeObserver(measureNativeComposer);
@@ -963,31 +977,77 @@
     });
   }
 
-  function isDuplicateSelfEcho(message) {
-    const viewer =
-      state.viewerName ||
-      findViewerName().trim().toLowerCase();
-    if (viewer) state.viewerName = viewer;
-    const username = String(message.username || "").trim().toLowerCase();
-    if (!viewer || username !== viewer) return false;
+  function normalizeEchoText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
 
-    const text = String(message.text || "").replace(/\s+/g, " ").trim();
+  function composerDraftText(input) {
+    if (!input) return "";
+    return collectFragments(input)
+      .map((fragment) => fragment.value || fragment.alt || "")
+      .join("");
+  }
+
+  function rememberOutgoingDraft(value) {
+    const text = normalizeEchoText(value);
     if (!text) return false;
-    const fingerprint = `${username}\n${text}`;
     const now = Date.now();
-    const previous = state.recentSelfMessages.get(fingerprint);
+    state.outgoingDrafts = state.outgoingDrafts.filter(
+      (draft) => now - draft.createdAt < 10000
+    );
+    state.outgoingDrafts.push({
+      text,
+      createdAt: now,
+      matches: 0,
+      username: ""
+    });
+    return true;
+  }
 
-    for (const [key, timestamp] of state.recentSelfMessages) {
-      if (now - timestamp > 10000) state.recentSelfMessages.delete(key);
+  function captureOutgoingEnter(event) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.isComposing ||
+      event.defaultPrevented
+    ) {
+      return;
     }
-    state.recentSelfMessages.set(fingerprint, now);
-    return previous !== undefined && now - previous < 2500;
+    rememberOutgoingDraft(composerDraftText(event.currentTarget));
+  }
+
+  function isDuplicateOutgoingEcho(message) {
+    const text = normalizeEchoText(message.text);
+    if (!text) return false;
+    const now = Date.now();
+    state.outgoingDrafts = state.outgoingDrafts.filter(
+      (draft) => now - draft.createdAt < 10000
+    );
+    const index = state.outgoingDrafts.findLastIndex(
+      (draft) => draft.text === text
+    );
+    if (index < 0) return false;
+
+    const draft = state.outgoingDrafts[index];
+    const username = String(message.username || "").trim().toLowerCase();
+    if (draft.matches === 0) {
+      draft.matches = 1;
+      draft.username = username;
+      return false;
+    }
+    if (draft.username && username !== draft.username) return false;
+
+    state.outgoingDrafts.splice(index, 1);
+    return true;
   }
 
   function appendMessage(message) {
     if (!message || state.seen.has(message.id)) return;
     state.seen.add(message.id);
-    if (isDuplicateSelfEcho(message)) return;
+    if (isDuplicateOutgoingEcho(message)) return;
     if (state.seen.size > state.settings.maxMessages * 2) {
       state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
     }
@@ -1224,13 +1284,12 @@
     state.virtualRenderFrame = 0;
     state.virtualDirty = false;
     state.followLatest = true;
-    state.viewerName = "";
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;
     state.nativeComposerResizeObserver = null;
     state.seen.clear();
-    state.recentSelfMessages.clear();
+    state.outgoingDrafts = [];
     state.processedNodes = new WeakSet();
     state.claimedPointButtons = new WeakSet();
     state.revealedFilterButtons = new WeakSet();
