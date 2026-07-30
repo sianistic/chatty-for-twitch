@@ -1,6 +1,6 @@
 {
   "name": "chatty-for-twitch",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "private": true,
   "description": "Chatterino-inspired replacement chat for Twitch.",
   "scripts": {

@@ -541,10 +541,22 @@
     return state.messages.length * state.virtualRowHeight;
   }
 
+  function effectiveScrollHeight() {
+    if (!state.list) return virtualScrollHeight();
+    const viewport = virtualViewportHeight();
+    return state.list.scrollHeight > viewport
+      ? state.list.scrollHeight
+      : virtualScrollHeight();
+  }
+
   function isNearBottom() {
     if (!state.list) return true;
-    const height = Math.max(state.list.scrollHeight, virtualScrollHeight());
-    return height - state.list.scrollTop - virtualViewportHeight() < 80;
+    return (
+      effectiveScrollHeight() -
+      state.list.scrollTop -
+      virtualViewportHeight() <
+      80
+    );
   }
 
   function handleVirtualScroll() {
@@ -556,8 +568,11 @@
   function updateJumpButton() {
     const button = state.root?.querySelector(".chatty-jump");
     if (!button) return;
-    const nearBottom = isNearBottom();
-    if (nearBottom) state.unreadCount = 0;
+    const nearBottom = state.followLatest || isNearBottom();
+    if (nearBottom) {
+      state.followLatest = true;
+      state.unreadCount = 0;
+    }
     button.hidden = nearBottom;
     button.textContent = state.unreadCount
       ? `${state.unreadCount} new - Jump to latest`
@@ -568,10 +583,7 @@
     if (!state.list) return;
     state.followLatest = true;
     renderVirtualWindow();
-    state.list.scrollTop = Math.max(
-      state.list.scrollHeight,
-      virtualScrollHeight()
-    );
+    state.list.scrollTop = effectiveScrollHeight();
     state.unreadCount = 0;
     updateJumpButton();
   }
@@ -895,17 +907,8 @@
     state.virtualEnd = end;
     state.virtualDirty = false;
 
-    const renderedHeight = state.virtualWindow.scrollHeight;
-    if (renderedHeight > 0 && end > start) {
-      const measured = renderedHeight / (end - start);
-      state.virtualRowHeight = Math.max(20, Math.min(80, measured));
-    }
-
     if (state.followLatest) {
-      state.list.scrollTop = Math.max(
-        state.list.scrollHeight,
-        virtualScrollHeight()
-      );
+      state.list.scrollTop = effectiveScrollHeight();
       state.unreadCount = 0;
     }
     updateJumpButton();

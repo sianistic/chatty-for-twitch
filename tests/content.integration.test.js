@@ -476,4 +476,49 @@ test("busy chat virtualizes history and renders older messages while scrolling",
     document.querySelector("[data-message-id='performance-0']"),
     "scrolling upward should render messages retained in the virtual history"
   );
+
+  let simulatedScrollTop = 0;
+  Object.defineProperties(list, {
+    clientHeight: { configurable: true, get: () => 400 },
+    scrollHeight: { configurable: true, get: () => 6000 },
+    scrollTop: {
+      configurable: true,
+      get: () => simulatedScrollTop,
+      set: (value) => {
+        simulatedScrollTop = Math.max(0, Math.min(Number(value), 5600));
+      }
+    }
+  });
+  Object.defineProperty(document.querySelector(".chatty-virtual-window"), "scrollHeight", {
+    configurable: true,
+    get: () => 4000
+  });
+
+  const jump = document.querySelector(".chatty-jump");
+  jump.click();
+
+  assert.equal(
+    jump.hidden,
+    true,
+    "jump-to-latest must stay hidden when the browser clamps the estimated bottom"
+  );
+
+  const latest = document.createElement("div");
+  latest.className = "chat-line__message";
+  latest.dataset.id = "performance-latest";
+  latest.innerHTML = `
+    <span data-a-target="chat-message-username" data-a-user="performance">performance</span>
+    <span data-a-target="chat-line-message-body">latest message</span>
+  `;
+  scroller.append(latest);
+  await waitFor(
+    dom.window,
+    () => document.querySelector("[data-message-id='performance-latest']")
+  );
+
+  assert.equal(
+    jump.hidden,
+    true,
+    "new messages must not create an unread count while following the latest chat"
+  );
 });
