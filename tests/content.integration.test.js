@@ -9,6 +9,16 @@ const { JSDOM } = require("jsdom");
 const coreSource = fs.readFileSync(path.join(__dirname, "../src/core.js"), "utf8");
 const contentSource = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8");
 
+async function waitFor(window, predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+  }
+  return predicate();
+}
+
 async function createFixture(options = {}) {
   const viewerName = options.viewerName || "viewer";
   const dom = new JSDOM(`<!doctype html>
@@ -344,8 +354,11 @@ test("message links preserve their URL and remain clickable", async () => {
 
 test("filtered messages are automatically revealed and mirrored", async () => {
   const dom = await createFixture();
-  const filtered = dom.window.document.querySelector(
-    ".chatty-message[data-message-id='message-filtered'] .chatty-content"
+  const filtered = await waitFor(
+    dom.window,
+    () => dom.window.document.querySelector(
+      ".chatty-message[data-message-id='message-filtered'] .chatty-content"
+    )
   );
   assert.ok(filtered);
   assert.match(filtered.textContent, /damn filter is visible/);
