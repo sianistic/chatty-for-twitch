@@ -20,6 +20,8 @@ async function createFixture({ existingTabs = [] } = {}) {
   };
   const localState = { chattyLiveStates: { alice: false } };
   const createdTabs = [];
+  const reloadedTabs = [];
+  const updatedTabs = [];
   const listeners = {};
 
   const chrome = {
@@ -46,9 +48,17 @@ async function createFixture({ existingTabs = [] } = {}) {
     tabs: {
       async create(options) {
         createdTabs.push(options);
-        return { id: createdTabs.length, ...options };
+        return { id: createdTabs.length, status: "loading", ...options };
       },
-      async query() { return structuredClone(existingTabs); }
+      async get(tabId) {
+        return { id: tabId, status: "complete", url: "https://www.twitch.tv/alice" };
+      },
+      async query() { return structuredClone(existingTabs); },
+      async reload(tabId) { reloadedTabs.push(tabId); },
+      async update(tabId, options) {
+        updatedTabs.push({ tabId, options });
+        return { id: tabId, ...options };
+      }
     }
   };
 
@@ -74,6 +84,8 @@ async function createFixture({ existingTabs = [] } = {}) {
 
   return {
     createdTabs,
+    reloadedTabs,
+    updatedTabs,
     listeners,
     enableAutoOpen() {
       settings = {
@@ -96,7 +108,21 @@ test("overlapping live checks open a newly-live channel only once", async () => 
   assert.equal(fixture.createdTabs.length, 1);
 });
 
-test("a live channel already open in Twitch does not get duplicated", async () => {
+test("a newly-live channel preloads before its tab becomes active", async () => {
+  const fixture = await createFixture();
+  fixture.enableAutoOpen();
+
+  fixture.listeners.alarm({ name: "chatty-live-channel-check" });
+  await tick();
+
+  assert.equal(fixture.createdTabs.length, 1);
+  assert.equal(fixture.createdTabs[0].active, false);
+  assert.equal(fixture.updatedTabs.length, 1);
+  assert.equal(fixture.updatedTabs[0].tabId, 1);
+  assert.equal(fixture.updatedTabs[0].options.active, true);
+});
+
+test("a live channel already open in Twitch is refreshed and focused", async () => {
   const fixture = await createFixture({
     existingTabs: [{ id: 44, url: "https://www.twitch.tv/alice" }]
   });
@@ -106,4 +132,8 @@ test("a live channel already open in Twitch does not get duplicated", async () =
   await tick();
 
   assert.equal(fixture.createdTabs.length, 0);
+  assert.deepEqual(fixture.reloadedTabs, [44]);
+  assert.equal(fixture.updatedTabs.length, 1);
+  assert.equal(fixture.updatedTabs[0].tabId, 44);
+  assert.equal(fixture.updatedTabs[0].options.active, true);
 });

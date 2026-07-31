@@ -5,6 +5,8 @@ importScripts("core.js");
 const CACHE_TTL = 5 * 60 * 1000;
 const LIVE_ALARM = "chatty-live-channel-check";
 const LIVE_STATE_KEY = "chattyLiveStates";
+const TAB_READY_TIMEOUT = 12000;
+const TAB_READY_POLL = 250;
 const cache = new Map();
 let liveCheckPromise = null;
 
@@ -72,10 +74,10 @@ async function channelIsLive(channel) {
   }
 }
 
-async function channelTabAlreadyExists(channel) {
+async function findChannelTab(channel) {
   try {
     const tabs = await chrome.tabs.query({ url: ["https://www.twitch.tv/*"] });
-    return tabs.some((tab) => {
+    return tabs.find((tab) => {
       try {
         const pathParts = new URL(tab.url).pathname.split("/").filter(Boolean);
         return pathParts.length === 1
@@ -86,16 +88,38 @@ async function channelTabAlreadyExists(channel) {
     });
   } catch (error) {
     console.info(`[Chatty] Could not inspect existing tabs for ${channel}:`, error.message);
-    return false;
+    return null;
+  }
+}
+
+async function waitForTabDocument(tabId) {
+  const deadline = Date.now() + TAB_READY_TIMEOUT;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (tab.status === "complete") return;
+    } catch (_error) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, TAB_READY_POLL));
   }
 }
 
 async function openLiveChannel(channel) {
-  if (await channelTabAlreadyExists(channel)) return;
-  await chrome.tabs.create({
+  const existing = await findChannelTab(channel);
+  if (existing?.id != null) {
+    await chrome.tabs.reload(existing.id);
+    await chrome.tabs.update(existing.id, { active: true });
+    return;
+  }
+
+  const created = await chrome.tabs.create({
     url: `https://www.twitch.tv/${encodeURIComponent(channel)}`,
-    active: true
+    active: false
   });
+  if (created?.id == null) return;
+  await waitForTabDocument(created.id);
+  await chrome.tabs.update(created.id, { active: true });
 }
 
 async function checkLiveChannels() {
