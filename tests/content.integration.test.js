@@ -263,6 +263,38 @@ test("the current viewer's optimistic echo is not rendered twice", async () => {
   assert.equal(enteredCopies.length, 1);
 });
 
+test("outgoing echo deduplication survives Twitch replacing the composer controls", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const composer = document.querySelector(".chat-input");
+  const oldInput = composer.querySelector("[data-a-target='chat-input']");
+  const oldSend = composer.querySelector("[data-a-target='chat-send-button']");
+  const input = oldInput.cloneNode(true);
+  const send = oldSend.cloneNode(true);
+  oldInput.replaceWith(input);
+  oldSend.replaceWith(send);
+
+  input.textContent = "survives replacement";
+  send.click();
+
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  for (const id of ["replacement-local", "replacement-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">survives replacement</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "survives replacement");
+  assert.equal(copies.length, 1);
+});
+
 test("past messages are hydrated after the delayed 7TV emote set loads", async () => {
   const dom = await createFixture({
     emotePayload: {

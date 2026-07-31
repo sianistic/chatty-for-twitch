@@ -259,21 +259,14 @@
       capture: true,
       signal: state.nativeComposerAbort.signal
     });
-    input?.addEventListener("keydown", captureOutgoingEnter, {
+    composer.addEventListener("keydown", captureOutgoingEnter, {
       capture: true,
       signal: state.nativeComposerAbort.signal
     });
-    (
-      composer.querySelector("[data-a-target='chat-send-button']") ||
-      document.querySelector("[data-a-target='chat-send-button']")
-    )?.addEventListener(
-      "click",
-      () => rememberOutgoingDraft(composerDraftText(input)),
-      {
-        capture: true,
-        signal: state.nativeComposerAbort.signal
-      }
-    );
+    composer.addEventListener("click", captureOutgoingClick, {
+      capture: true,
+      signal: state.nativeComposerAbort.signal
+    });
 
     if (typeof ResizeObserver === "function") {
       state.nativeComposerResizeObserver = new ResizeObserver(measureNativeComposer);
@@ -1016,7 +1009,15 @@
     ) {
       return;
     }
-    rememberOutgoingDraft(composerDraftText(event.currentTarget));
+    const input = event.target?.closest?.(SELECTORS.nativeInput);
+    if (input) rememberOutgoingDraft(composerDraftText(input));
+  }
+
+  function captureOutgoingClick(event) {
+    const button = event.target?.closest?.("[data-a-target='chat-send-button']");
+    if (!button || !event.currentTarget.contains(button)) return;
+    const input = event.currentTarget.querySelector(SELECTORS.nativeInput);
+    rememberOutgoingDraft(composerDraftText(input));
   }
 
   function isDuplicateOutgoingEcho(message) {
