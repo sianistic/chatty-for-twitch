@@ -295,6 +295,72 @@ test("outgoing echo deduplication survives Twitch replacing the composer control
   assert.equal(copies.length, 1);
 });
 
+test("a delayed third Twitch echo stays collapsed into one sent message", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  let now = 1000;
+  dom.window.Date.now = () => now;
+
+  const input = document.querySelector("[data-a-target='chat-input']");
+  input.textContent = "one send three echoes";
+  document.querySelector("[data-a-target='chat-send-button']").click();
+
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const appendEcho = (id) => {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">one send three echoes</span>
+    `;
+    scroller.append(message);
+  };
+
+  appendEcho("third-echo-local");
+  appendEcho("third-echo-confirmed");
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  now += 5000;
+  appendEcho("third-echo-reconciled");
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "one send three echoes");
+  assert.equal(copies.length, 1);
+});
+
+test("separate captured sends with the same text each remain visible once", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const input = document.querySelector("[data-a-target='chat-input']");
+  const send = document.querySelector("[data-a-target='chat-send-button']");
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+
+  const sendWithEchoes = async (prefix) => {
+    input.textContent = "intentional repeat";
+    send.click();
+    for (const suffix of ["local", "confirmed", "reconciled"]) {
+      const message = document.createElement("div");
+      message.className = "chat-line__message";
+      message.dataset.id = `${prefix}-${suffix}`;
+      message.innerHTML = `
+        <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+        <span data-a-target="chat-line-message-body">intentional repeat</span>
+      `;
+      scroller.append(message);
+    }
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+  };
+
+  await sendWithEchoes("repeat-one");
+  await sendWithEchoes("repeat-two");
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "intentional repeat");
+  assert.equal(copies.length, 2);
+});
+
 test("past messages are hydrated after the delayed 7TV emote set loads", async () => {
   const dom = await createFixture({
     emotePayload: {

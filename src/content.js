@@ -5,6 +5,7 @@
   const VIRTUAL_OVERSCAN = 10;
   const VIRTUAL_ROW_HEIGHT = 28;
   const VIRTUAL_VIEWPORT_FALLBACK = 480;
+  const OUTGOING_ECHO_TTL = 15000;
   const state = {
     root: null,
     list: null,
@@ -986,7 +987,7 @@
     if (!text) return false;
     const now = Date.now();
     state.outgoingDrafts = state.outgoingDrafts.filter(
-      (draft) => now - draft.createdAt < 10000
+      (draft) => now - draft.createdAt < OUTGOING_ECHO_TTL
     );
     state.outgoingDrafts.push({
       text,
@@ -1025,7 +1026,7 @@
     if (!text) return false;
     const now = Date.now();
     state.outgoingDrafts = state.outgoingDrafts.filter(
-      (draft) => now - draft.createdAt < 10000
+      (draft) => now - draft.createdAt < OUTGOING_ECHO_TTL
     );
     const index = state.outgoingDrafts.findLastIndex(
       (draft) => draft.text === text
@@ -1040,8 +1041,8 @@
       return false;
     }
     if (draft.username && username !== draft.username) return false;
-
-    state.outgoingDrafts.splice(index, 1);
+    if (!draft.username && username) draft.username = username;
+    draft.matches += 1;
     return true;
   }
 
