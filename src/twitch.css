@@ -330,6 +330,42 @@
   text-decoration-color: currentColor;
 }
 
+.chatty-reply {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  margin-left: 4px;
+  padding: 0;
+  color: #b9b6bf;
+  vertical-align: -2px;
+  background: #28272c;
+  border: 1px solid #444149;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+
+.chatty-message:hover .chatty-reply,
+.chatty-message:focus-within .chatty-reply,
+.chatty-reply:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.chatty-reply:hover,
+.chatty-reply:focus-visible {
+  color: #fff;
+  border-color: #8f7aa0;
+  outline: none;
+}
+
 .chatty-mod-actions {
   display: inline-flex;
   gap: 3px;

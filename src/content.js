@@ -897,6 +897,19 @@
     content.className = "chatty-content";
     appendFragments(content, message.fragments || [{ type: "text", value: message.text }]);
     row.append(content);
+
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "chatty-reply";
+    reply.textContent = "↩";
+    reply.title = `Reply to ${message.username}`;
+    reply.setAttribute("aria-label", `Reply to ${message.username}`);
+    reply.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openNativeReply(message);
+    });
+    row.append(reply);
+
     if (
       state.isModerator &&
       message.username &&
@@ -1199,6 +1212,73 @@
       return;
     }
     setStatus(`User card unavailable for ${message.username}`);
+  }
+
+  function findNativeMessage(message) {
+    const candidates = Array.from(
+      state.nativeContainer?.querySelectorAll(SELECTORS.message) || []
+    ).reverse();
+    const exact = candidates.find((node) =>
+      node.getAttribute("data-id") === message.id ||
+      node.querySelector("[data-a-target='chat-message-text']")?.id === message.id
+    );
+    if (exact) return exact;
+
+    const expectedUser = String(message.username || "").trim().toLowerCase();
+    const expectedText = normalizeEchoText(message.text);
+    return candidates.find((node) => {
+      const usernameNode =
+        node.querySelector("[data-a-user]") ||
+        node.querySelector("[data-a-target='chat-message-username']");
+      const username = (
+        usernameNode?.getAttribute("data-a-user") ||
+        usernameNode?.textContent ||
+        ""
+      ).trim().toLowerCase();
+      const body =
+        node.querySelector("[data-a-target='chat-line-message-body']") ||
+        node.querySelector(".text-fragment")?.parentElement;
+      if (!body) return false;
+      const text = collectFragments(body)
+        .map((fragment) => fragment.value || fragment.alt || "")
+        .join("");
+      return username === expectedUser && normalizeEchoText(text) === expectedText;
+    }) || null;
+  }
+
+  function nativeReplyButton(messageNode) {
+    return messageNode?.querySelector([
+      "[data-a-target='chat-message-reply-button']",
+      "button[data-test-selector='chat-message-reply-button']",
+      "button[aria-label^='Reply to ' i]",
+      "button[aria-label='Reply' i]"
+    ].join(","));
+  }
+
+  function openNativeReply(message) {
+    const nativeMessage = findNativeMessage(message);
+    if (!nativeMessage) {
+      setStatus(`Reply unavailable for ${message.username}`);
+      return;
+    }
+
+    nativeMessage.dispatchEvent(new MouseEvent("mouseover", {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    }));
+    const activate = () => {
+      const button = nativeReplyButton(nativeMessage);
+      if (!button) return false;
+      button.click();
+      setStatus(`Replying to ${message.username}`);
+      return true;
+    };
+    if (!activate()) {
+      setTimeout(() => {
+        if (!activate()) setStatus(`Reply unavailable for ${message.username}`);
+      }, 50);
+    }
   }
 
   function revealFilteredMessage(node) {

@@ -55,6 +55,7 @@ async function createFixture(options = {}) {
                     src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"
                   >
                 </span>
+                <button data-a-target="chat-message-reply-button" aria-label="Reply to alice">Reply</button>
               </div>
               <div class="chat-line__message" data-id="message-filtered">
                 <span
@@ -151,6 +152,24 @@ async function createFixture(options = {}) {
       .querySelector("[aria-label='Claim Bonus']")
       .addEventListener("click", options.onClaim);
   }
+  const nativeReply = window.document.querySelector(
+    "[data-a-target='chat-message-reply-button']"
+  );
+  if (options.lazyReply) {
+    const nativeMessage = nativeReply.closest(".chat-line__message");
+    nativeReply.remove();
+    nativeMessage.addEventListener("mouseover", () => {
+      if (nativeMessage.querySelector("[data-a-target='chat-message-reply-button']")) return;
+      const reply = window.document.createElement("button");
+      reply.dataset.aTarget = "chat-message-reply-button";
+      reply.setAttribute("aria-label", "Reply to alice");
+      reply.textContent = "Reply";
+      if (options.onReply) reply.addEventListener("click", options.onReply);
+      nativeMessage.append(reply);
+    });
+  } else if (options.onReply) {
+    nativeReply.addEventListener("click", options.onReply);
+  }
   window.document
     .querySelector("[data-a-target='chat-message-blocked']")
     .addEventListener("click", (event) => {
@@ -191,6 +210,24 @@ test("username clicks delegate to Twitch's native user-card trigger", async () =
     .querySelector(".chatty-name")
     .dispatchEvent(new MouseEvent("click", { bubbles: true }));
   assert.equal(clicks, 1);
+});
+
+test("the hover reply action delegates to Twitch's lazily rendered native reply", async () => {
+  let replies = 0;
+  const dom = await createFixture({
+    lazyReply: true,
+    onReply: () => { replies += 1; }
+  });
+  const { document } = dom.window;
+  const reply = document.querySelector(
+    ".chatty-message[data-message-id='message-1'] .chatty-reply"
+  );
+
+  assert.ok(reply);
+  assert.equal(reply.getAttribute("aria-label"), "Reply to alice");
+  reply.click();
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
+  assert.equal(replies, 1);
 });
 
 test("emote hover displays provider and emote ID", async () => {
