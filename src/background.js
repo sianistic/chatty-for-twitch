@@ -5,8 +5,6 @@ importScripts("core.js");
 const CACHE_TTL = 5 * 60 * 1000;
 const LIVE_ALARM = "chatty-live-channel-check";
 const LIVE_STATE_KEY = "chattyLiveStates";
-const TAB_READY_TIMEOUT = 12000;
-const TAB_READY_POLL = 250;
 const cache = new Map();
 let liveCheckPromise = null;
 
@@ -92,34 +90,33 @@ async function findChannelTab(channel) {
   }
 }
 
-async function waitForTabDocument(tabId) {
-  const deadline = Date.now() + TAB_READY_TIMEOUT;
-  while (Date.now() < deadline) {
+async function foregroundTab(tabId, windowId) {
+  if (windowId != null) {
     try {
-      const tab = await chrome.tabs.get(tabId);
-      if (tab.status === "complete") return;
-    } catch (_error) {
-      return;
+      await chrome.windows.update(windowId, { focused: true });
+    } catch (error) {
+      console.info(`[Chatty] Could not focus Twitch window ${windowId}:`, error.message);
     }
-    await new Promise((resolve) => setTimeout(resolve, TAB_READY_POLL));
   }
+  return chrome.tabs.update(tabId, { active: true });
 }
 
 async function openLiveChannel(channel) {
   const existing = await findChannelTab(channel);
   if (existing?.id != null) {
+    await foregroundTab(existing.id, existing.windowId);
     await chrome.tabs.reload(existing.id);
-    await chrome.tabs.update(existing.id, { active: true });
     return;
   }
 
-  const created = await chrome.tabs.create({
-    url: `https://www.twitch.tv/${encodeURIComponent(channel)}`,
-    active: false
-  });
+  // Twitch defers parts of its player while a page is hidden. Create and focus
+  // the tab first so the Twitch navigation starts with a visible document.
+  const created = await chrome.tabs.create({ active: true });
   if (created?.id == null) return;
-  await waitForTabDocument(created.id);
-  await chrome.tabs.update(created.id, { active: true });
+  await foregroundTab(created.id, created.windowId);
+  await chrome.tabs.update(created.id, {
+    url: `https://www.twitch.tv/${encodeURIComponent(channel)}`
+  });
 }
 
 async function checkLiveChannels() {

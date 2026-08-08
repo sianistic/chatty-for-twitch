@@ -40,6 +40,7 @@
     isModerator: false,
     pinnedSignature: "",
     dismissedPinnedSignature: "",
+    predictionSignature: "",
     route: window.location.href,
     rescanTimer: 0,
     pointsScanTimer: 0
@@ -62,6 +63,15 @@
     ],
     nativeInput: "[data-a-target='chat-input'][contenteditable='true']",
     pinned: ".pinned-chat__highlight-card",
+    prediction: [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      "[data-test-selector^='community-prediction-highlight-']",
+      "[data-test-selector*='community-prediction' i]",
+      "[data-a-target*='community-prediction' i]",
+      ".community-prediction-highlight"
+    ].join(","),
     pointsClaim: [
       "button[aria-label*='Claim Bonus' i]",
       "button[data-test-selector='community-points-claim-button']",
@@ -137,6 +147,15 @@
         </div>
         <div class="chatty-pinned-content"></div>
       </aside>
+      <aside class="chatty-prediction" aria-label="Active Twitch Prediction" aria-live="polite" hidden>
+        <div class="chatty-prediction-header">
+          <strong>PREDICTION</strong>
+          <span class="chatty-prediction-status"></span>
+          <button type="button" class="chatty-prediction-open">Open in Twitch</button>
+        </div>
+        <div class="chatty-prediction-title"></div>
+        <div class="chatty-prediction-outcomes"></div>
+      </aside>
       <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions">
         <div class="chatty-virtual-spacer chatty-virtual-top" aria-hidden="true"></div>
         <div class="chatty-virtual-window"></div>
@@ -208,6 +227,7 @@
     panel.querySelector(".chatty-jump").addEventListener("click", jumpToLatest);
     panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
     panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
+    panel.querySelector(".chatty-prediction-open").addEventListener("click", openNativePrediction);
     panel.querySelector(".chatty-save").addEventListener("click", savePanelSettings);
     for (const tab of panel.querySelectorAll("[data-settings-tab]")) {
       tab.addEventListener("click", switchSettingsTab);
@@ -219,6 +239,7 @@
     applySettings();
     syncNativeComposer(host);
     syncPinnedMessage();
+    syncPrediction();
     scanChannelPoints();
   }
 
@@ -782,6 +803,159 @@
     if (!panel) return;
     state.dismissedPinnedSignature = panel.dataset.signature || state.pinnedSignature;
     panel.hidden = true;
+  }
+
+  function firstText(node, selectors) {
+    for (const selector of selectors) {
+      const value = node.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function findNativePrediction() {
+    const rootSelector = [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      ".community-prediction-highlight",
+      ".community-highlight-stack__card",
+      ".community-highlight-stack__card--wide",
+      ".community-highlight"
+    ].join(",");
+    for (const marker of document.querySelectorAll(SELECTORS.prediction)) {
+      if (state.root?.contains(marker)) continue;
+      const root = marker.closest(rootSelector) || marker;
+      if (!state.root?.contains(root)) return root;
+    }
+    return null;
+  }
+
+  function readPrediction(node) {
+    if (!node) return null;
+    const title = firstText(node, [
+      "[data-test-selector='prediction-title']",
+      "[data-a-target='prediction-title']",
+      "[data-test-selector='community-prediction-highlight-header__title']",
+      "[data-test-selector*='prediction-title']",
+      "h3",
+      "h4"
+    ]);
+    if (!title) return null;
+
+    let outcomeNodes = Array.from(node.querySelectorAll(
+      [
+        "[data-test-selector='prediction-outcome']",
+        "[data-a-target='prediction-outcome']",
+        "[data-test-selector='community-prediction-highlight-body__outcome']"
+      ].join(",")
+    ));
+    if (!outcomeNodes.length) {
+      outcomeNodes = Array.from(node.querySelectorAll("button")).filter((button) =>
+        !/view|details|predict now|manage/i.test(
+          `${button.getAttribute("aria-label") || ""} ${button.textContent || ""}`
+        )
+      );
+    }
+    const outcomes = outcomeNodes.slice(0, 4).map((outcome) => {
+      const label = firstText(outcome, [
+        "[data-test-selector='prediction-outcome-title']",
+        "[data-a-target='prediction-outcome-title']",
+        "[data-test-selector='community-prediction-highlight-body__outcome-title']",
+        "strong"
+      ]) || outcome.textContent?.replace(/\s+/g, " ").trim() || "Outcome";
+      const detail = firstText(outcome, [
+        "[data-test-selector='prediction-outcome-points']",
+        "[data-test-selector='prediction-outcome-percentage']",
+        "[data-a-target='prediction-outcome-points']",
+        "[data-test-selector='community-prediction-highlight-body__outcome-points']",
+        "small"
+      ]);
+      return { label, detail };
+    });
+    const status = firstText(node, [
+      "[data-test-selector='prediction-status']",
+      "[data-a-target='prediction-status']",
+      "[data-test-selector*='prediction-timer']",
+      "time"
+    ]);
+    const signature = `${title}|${status}|${outcomes
+      .map((outcome) => `${outcome.label}:${outcome.detail}`)
+      .join("|")}`;
+    return { title, outcomes, status, signature };
+  }
+
+  function syncPrediction() {
+    if (!state.root) return;
+    const panel = state.root.querySelector(".chatty-prediction");
+    const prediction = readPrediction(findNativePrediction());
+    if (!prediction) {
+      panel.hidden = true;
+      state.predictionSignature = "";
+      return;
+    }
+    if (prediction.signature === state.predictionSignature && !panel.hidden) return;
+    state.predictionSignature = prediction.signature;
+    panel.querySelector(".chatty-prediction-title").textContent = prediction.title;
+    panel.querySelector(".chatty-prediction-status").textContent = prediction.status || "Live";
+    const outcomes = panel.querySelector(".chatty-prediction-outcomes");
+    outcomes.replaceChildren();
+    for (const outcome of prediction.outcomes) {
+      const item = document.createElement("div");
+      item.className = "chatty-prediction-outcome";
+      const label = document.createElement("strong");
+      label.textContent = outcome.label;
+      const detail = document.createElement("span");
+      detail.textContent = outcome.detail;
+      item.append(label, detail);
+      outcomes.append(item);
+    }
+    panel.hidden = false;
+  }
+
+  function openNativePrediction() {
+    const native = findNativePrediction();
+    if (!native) {
+      setStatus("No active Twitch Prediction");
+      return;
+    }
+    const explicit = native.querySelector([
+      "[data-test-selector='prediction-details']",
+      "[data-test-selector='community-prediction-highlight-header__action']",
+      "[data-a-target='community-prediction-highlight-action']"
+    ].join(","));
+    const candidates = Array.from(native.querySelectorAll("button")).filter((button) => {
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+      if (button.closest("[data-test-selector*='outcome' i], [data-a-target*='outcome' i]")) {
+        return false;
+      }
+      return !/how-to-play|terms-and-conditions|send-feedback|dismiss-message/i.test(
+        `${button.dataset.testSelector || ""} ${button.dataset.aTarget || ""}`
+      );
+    });
+    const trigger = explicit && !explicit.disabled
+      ? explicit
+      : candidates.length === 1
+        ? candidates[0]
+        : native.matches("button") && !native.disabled
+          ? native
+          : null;
+    if (trigger) {
+      trigger.click();
+      setStatus("Opened Twitch Prediction");
+      return;
+    }
+
+    const points = document.querySelector(
+      "[data-test-selector='community-points-summary'] button, " +
+      "[data-a-target='community-points-summary'] button"
+    );
+    if (points) {
+      points.click();
+      setStatus("Opened Channel Points — choose Predictions");
+      return;
+    }
+    setStatus("Prediction controls unavailable");
   }
 
   function findNativeContainer(shell) {
@@ -1379,6 +1553,7 @@
     state.isModerator = false;
     state.pinnedSignature = "";
     state.dismissedPinnedSignature = "";
+    state.predictionSignature = "";
     document.documentElement.classList.remove("chatty-active");
   }
 
@@ -1423,6 +1598,9 @@
       }
       if (state.root && mutationsTouchSelector(records, SELECTORS.pinned)) {
         syncPinnedMessage();
+      }
+      if (state.root && mutationsTouchSelector(records, SELECTORS.prediction)) {
+        syncPrediction();
       }
       if (state.root && mutationsTouchSelector(records, SELECTORS.pointsClaim)) {
         schedulePointsScan();

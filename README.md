@@ -18,10 +18,14 @@ stream with a dense, Chatterino-inspired view.
 - Custom highlights by username or phrase
 - Automatic mention highlighting
 - Click a username to open Twitch's native user card
+- Hover a message for a right-edge reply button that opens Twitch's native
+  threaded reply composer
 - Clickable, highlighted links that open safely in a new tab
 - Automatically revealed messages hidden by Twitch's local chat filter
 - A jump-to-latest control with an unread-message count
 - A compact pinned-message panel with attribution, links, and native expansion
+- A compact live Predictions panel with outcomes and pool information; voting,
+  confirmation, and results open in Twitch's authenticated native interface
 - Moderator-only delete, 10-minute timeout, and ban quick actions
 - Twitch's real authenticated Slate composer remains visible and fully functional
 - Channel-point reward messages receive a distinct style
@@ -46,13 +50,17 @@ The extension popup can turn the replacement on or off. Use the settings button
 in the Twitch chat header to edit highlights. Its **Automation** tab controls
 automatic point claims and live-channel opening.
 
-## Why point spending uses Twitch's native picker
+## Why point and Prediction spending use Twitch's native UI
 
 Twitch's documented Channel Points API lets broadcasters and authorized apps
 manage custom rewards and redemptions; it does not provide a supported
 viewer-facing API for an extension to spend a viewer's points. Chatty therefore
 opens Twitch's own picker instead of reading credentials or calling private,
 fragile endpoints.
+
+Twitch's documented Predictions endpoints require broadcaster prediction
+permissions and do not provide a viewer-voting endpoint. Chatty mirrors the
+active Prediction but delegates voting and point commitment to Twitch.
 
 ## Privacy
 

@@ -8,6 +8,7 @@ const { JSDOM } = require("jsdom");
 
 const coreSource = fs.readFileSync(path.join(__dirname, "../src/core.js"), "utf8");
 const contentSource = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8");
+const twitchCssSource = fs.readFileSync(path.join(__dirname, "../src/twitch.css"), "utf8");
 
 async function waitFor(window, predicate, timeoutMs = 500) {
   const deadline = Date.now() + timeoutMs;
@@ -21,6 +22,21 @@ async function waitFor(window, predicate, timeoutMs = 500) {
 
 async function createFixture(options = {}) {
   const viewerName = options.viewerName || "viewer";
+  const predictionMarkup = options.prediction ? `
+    <section data-test-selector="community-prediction-highlight">
+      <strong data-test-selector="prediction-title">${options.prediction.title}</strong>
+      <div data-test-selector="prediction-outcomes">
+        ${options.prediction.outcomes.map((outcome) => `
+          <div data-test-selector="prediction-outcome">
+            <span data-test-selector="prediction-outcome-title">${outcome.title}</span>
+            <span data-test-selector="prediction-outcome-points">${outcome.detail}</span>
+          </div>
+        `).join("")}
+      </div>
+      <span data-test-selector="prediction-status">${options.prediction.status || "Predict now"}</span>
+      <button data-test-selector="prediction-details">View Prediction</button>
+    </section>
+  ` : "";
   const dom = new JSDOM(`<!doctype html>
     <html><body>
       <button data-a-target="user-menu-toggle"><img alt="${viewerName}"></button>
@@ -35,6 +51,7 @@ async function createFixture(options = {}) {
               </p>
               <button aria-label="Expand">Expand</button>
             </div>
+            ${predictionMarkup}
             <div data-a-target="chat-scroller">
               <div class="chat-line__message" data-id="message-1">
                 <img
@@ -152,6 +169,16 @@ async function createFixture(options = {}) {
       .querySelector("[aria-label='Claim Bonus']")
       .addEventListener("click", options.onClaim);
   }
+  if (options.onPointsOpen) {
+    window.document
+      .querySelector("[data-test-selector='community-points-summary'] button")
+      .addEventListener("click", options.onPointsOpen);
+  }
+  if (options.onPredictionOpen) {
+    window.document
+      .querySelector("[data-test-selector='prediction-details']")
+      ?.addEventListener("click", options.onPredictionOpen);
+  }
   const nativeReply = window.document.querySelector(
     "[data-a-target='chat-message-reply-button']"
   );
@@ -228,6 +255,13 @@ test("the hover reply action delegates to Twitch's lazily rendered native reply"
   reply.click();
   await new Promise((resolve) => dom.window.setTimeout(resolve, 10));
   assert.equal(replies, 1);
+});
+
+test("the reply action stays anchored to the right edge of each message", () => {
+  const rule = twitchCssSource.match(/\.chatty-reply\s*\{([^}]*)\}/)?.[1] || "";
+  assert.match(rule, /position:\s*absolute/);
+  assert.match(rule, /right:\s*7px/);
+  assert.match(rule, /top:\s*50%/);
 });
 
 test("emote hover displays provider and emote ID", async () => {
@@ -580,6 +614,92 @@ test("pinned message UI includes attribution, content, and links", async () => {
     pinned.querySelector(".chatty-link").href,
     "https://example.com/rules"
   );
+});
+
+test("active Twitch predictions are mirrored and open the native voting UI", async () => {
+  let opens = 0;
+  const dom = await createFixture({
+    prediction: {
+      title: "Will the run finish under two hours?",
+      status: "2 minutes left",
+      outcomes: [
+        { title: "Yes", detail: "62% · 18.4K" },
+        { title: "No", detail: "38% · 11.2K" }
+      ]
+    },
+    onPredictionOpen: () => { opens += 1; }
+  });
+  const prediction = dom.window.document.querySelector(".chatty-prediction");
+
+  assert.ok(prediction);
+  assert.equal(prediction.hidden, false);
+  assert.equal(
+    prediction.querySelector(".chatty-prediction-title").textContent,
+    "Will the run finish under two hours?"
+  );
+  assert.equal(prediction.querySelectorAll(".chatty-prediction-outcome").length, 2);
+  assert.match(prediction.textContent, /62% · 18\.4K/);
+  prediction.querySelector(".chatty-prediction-open").click();
+  assert.equal(opens, 1);
+});
+
+test("the Predictions panel follows native prediction start and end mutations", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const prediction = document.querySelector(".chatty-prediction");
+  assert.equal(prediction.hidden, true);
+
+  const native = document.createElement("section");
+  native.dataset.testSelector = "community-prediction-highlight";
+  native.innerHTML = `
+    <strong data-test-selector="prediction-title">Next match winner?</strong>
+    <div data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Blue</span>
+      <span data-test-selector="prediction-outcome-points">4.2K</span>
+    </div>
+    <div data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Red</span>
+      <span data-test-selector="prediction-outcome-points">3.7K</span>
+    </div>
+    <button data-test-selector="prediction-details">Predict</button>
+  `;
+  document.querySelector(".chat-room__content").prepend(native);
+  await waitFor(dom.window, () => prediction.hidden === false);
+  assert.match(prediction.textContent, /Next match winner/);
+
+  native.remove();
+  await waitFor(dom.window, () => prediction.hidden === true);
+  assert.equal(prediction.hidden, true);
+});
+
+test("ambiguous Prediction choices open Channel Points without selecting an outcome", async () => {
+  let pointsOpens = 0;
+  let outcomeClicks = 0;
+  const dom = await createFixture({
+    onPointsOpen: () => { pointsOpens += 1; }
+  });
+  const { document } = dom.window;
+  const native = document.createElement("section");
+  native.dataset.testSelector = "community-prediction-highlight";
+  native.innerHTML = `
+    <strong data-test-selector="prediction-title">Choose carefully</strong>
+    <button data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Left</span>
+    </button>
+    <button data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Right</span>
+    </button>
+  `;
+  for (const outcome of native.querySelectorAll("button")) {
+    outcome.addEventListener("click", () => { outcomeClicks += 1; });
+  }
+  document.querySelector(".chat-room__content").prepend(native);
+  const panel = document.querySelector(".chatty-prediction");
+  await waitFor(dom.window, () => panel.hidden === false);
+
+  panel.querySelector(".chatty-prediction-open").click();
+  assert.equal(outcomeClicks, 0);
+  assert.equal(pointsOpens, 1);
 });
 
 test("moderators receive native-command quick actions", async () => {
