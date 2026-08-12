@@ -326,7 +326,8 @@
 
 .chatty-message {
   position: relative;
-  padding: 3px 32px 3px 10px;
+  min-height: 28px;
+  padding: 3px 38px 3px 10px;
   overflow-wrap: anywhere;
   line-height: 1.35;
   contain: layout paint style;
@@ -433,30 +434,30 @@
 .chatty-reply {
   position: absolute;
   top: 50%;
-  right: 7px;
+  right: 4px;
+  z-index: 2;
   display: inline-flex;
-  width: 18px;
-  height: 18px;
+  width: 28px;
+  height: 28px;
   align-items: center;
   justify-content: center;
   margin: 0;
   padding: 0;
-  color: #b9b6bf;
-  background: #28272c;
-  border: 1px solid #444149;
-  border-radius: 4px;
+  color: #dedbe4;
+  background: #29282e;
+  border: 1px solid #5a5661;
+  border-radius: 6px;
   font: inherit;
-  font-size: 12px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-50%);
-  transition: opacity 100ms ease, color 100ms ease, border-color 100ms ease;
+  transition: opacity 70ms ease, color 80ms ease, background 80ms ease, border-color 80ms ease;
 }
 
 .chatty-message:hover .chatty-reply,
-.chatty-message:focus-within .chatty-reply,
 .chatty-reply:focus-visible {
   opacity: 1;
   pointer-events: auto;
@@ -465,8 +466,130 @@
 .chatty-reply:hover,
 .chatty-reply:focus-visible {
   color: #fff;
+  background: #413c49;
   border-color: #8f7aa0;
+  outline: 2px solid rgb(169 112 255 / 65%);
+  outline-offset: 1px;
+}
+
+.chatty-reply-context {
+  display: inline-flex;
+  max-width: min(44%, 180px);
+  height: 18px;
+  align-items: center;
+  gap: 3px;
+  margin: 0 5px 0 0;
+  padding: 0 5px;
+  overflow: hidden;
+  color: #bdb8c8;
+  vertical-align: -4px;
+  white-space: nowrap;
+  background: #24222a;
+  border: 1px solid #403b49;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.chatty-reply-context:hover,
+.chatty-reply-context:focus-visible {
+  color: #fff;
+  background: #332d3b;
+  border-color: #806995;
   outline: none;
+}
+
+.chatty-reply-context-arrow {
+  color: #a970ff;
+  font-size: 13px;
+}
+
+.chatty-reply-context strong {
+  color: #d8c2f2;
+  font-size: 11px;
+}
+
+.chatty-reply-context-text {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chatty-thread {
+  position: absolute;
+  z-index: 70;
+  inset: 50px 0 0;
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  color: #efeff1;
+  background: #111114;
+  border-top: 1px solid #36333d;
+}
+
+.chatty-thread[hidden] {
+  display: none;
+}
+
+.chatty-thread-header {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 7px;
+  min-height: 42px;
+  padding: 6px 9px;
+  align-items: center;
+  background: #19181d;
+  border-bottom: 1px solid #302d35;
+}
+
+.chatty-thread-close {
+  width: 28px;
+  height: 28px;
+  color: #ddd9e2;
+  background: #29272e;
+  border: 1px solid #4a4651;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.chatty-thread-count {
+  color: #8d8795;
+  font-size: 11px;
+}
+
+.chatty-thread-list {
+  min-height: 0;
+  padding: 6px 0 12px;
+  overflow-y: auto;
+}
+
+.chatty-thread-message {
+  padding: 7px 10px;
+  border-bottom: 1px solid rgb(255 255 255 / 5%);
+}
+
+.chatty-thread-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+
+.chatty-thread-user {
+  color: #d5b7ff;
+  font-size: 12px;
+}
+
+.chatty-thread-meta time {
+  color: #696471;
+  font-size: 10px;
+}
+
+.chatty-thread-text {
+  color: #e5e2e8;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 .chatty-mod-actions {

@@ -18,6 +18,8 @@
     virtualRowHeight: VIRTUAL_ROW_HEIGHT,
     virtualRenderFrame: 0,
     virtualDirty: false,
+    replyInteractionUntil: 0,
+    threadAnchor: null,
     followLatest: true,
     settings: core.sanitizeSettings({}),
     emotes: new Map(),
@@ -61,7 +63,23 @@
       "[data-a-target='chat-scroller']",
       ".chat-scrollable-area__message-container"
     ],
+    chatReady: [
+      ".stream-chat",
+      "[data-test-selector='chat-room-component-layout']",
+      "[data-a-target='chat-scroller']",
+      ".chat-scrollable-area__message-container"
+    ].join(","),
     nativeInput: "[data-a-target='chat-input'][contenteditable='true']",
+    composer: ".chat-input, [data-a-target='chat-input'][contenteditable='true']",
+    replyContext: [
+      "[data-a-target='chat-message-reply-context']",
+      "[data-test-selector='chat-message-reply-context']",
+      "[data-a-target='reply-context']",
+      "[data-test-selector='reply-context']",
+      "[data-a-target*='reply-context' i]",
+      "[data-test-selector*='reply-context' i]",
+      ".chat-line__message--reply"
+    ].join(","),
     pinned: ".pinned-chat__highlight-card",
     prediction: [
       "[data-test-selector='community-prediction-highlight']",
@@ -70,6 +88,14 @@
       "[data-test-selector^='community-prediction-highlight-']",
       "[data-test-selector*='community-prediction' i]",
       "[data-a-target*='community-prediction' i]",
+      ".community-prediction-highlight"
+    ].join(","),
+    predictionMutation: [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      "[data-test-selector^='community-prediction-highlight-']",
+      "[data-a-target^='community-prediction-highlight-']",
       ".community-prediction-highlight"
     ].join(","),
     pointsClaim: [
@@ -86,6 +112,64 @@
       if (node) return node;
     }
     return null;
+  }
+
+  function uniqueSelectorMatches(selectors, scope = document) {
+    const seen = new Set();
+    const matches = [];
+    for (const selector of selectors) {
+      for (const node of scope.querySelectorAll(selector)) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        matches.push(node);
+      }
+    }
+    return matches;
+  }
+
+  function elementLayoutScore(node) {
+    if (
+      !node?.isConnected ||
+      node.closest?.("[hidden], [aria-hidden='true'], [inert]")
+    ) {
+      return -1;
+    }
+    const style = window.getComputedStyle?.(node);
+    if (style?.display === "none" || style?.visibility === "hidden") return -1;
+    const rect = node.getBoundingClientRect?.();
+    return rect && rect.width > 0 && rect.height > 0 ? 1 : 0;
+  }
+
+  function compareLayoutRank(left, right) {
+    return (
+      Number(right.layout >= 0) - Number(left.layout >= 0) ||
+      Number(right.layout > 0) - Number(left.layout > 0)
+    );
+  }
+
+  function findChatShell(requireContainer = false) {
+    const candidates = uniqueSelectorMatches(SELECTORS.chatShell);
+    const scored = candidates.map((shell, index) => {
+      const container = findNativeContainer(shell);
+      const messages = shell.querySelectorAll(SELECTORS.message).length;
+      const composer = shell.querySelector(".chat-input");
+      return {
+        shell,
+        container,
+        messages,
+        composer,
+        layout: elementLayoutScore(shell),
+        index,
+      };
+    }).filter((candidate) => !requireContainer || candidate.container);
+    scored.sort((left, right) =>
+      compareLayoutRank(left, right) ||
+      Number(Boolean(right.container)) - Number(Boolean(left.container)) ||
+      right.messages - left.messages ||
+      Number(Boolean(right.composer)) - Number(Boolean(left.composer)) ||
+      left.index - right.index
+    );
+    return scored[0]?.shell || null;
   }
 
   function channelFromLocation() {
@@ -161,6 +245,14 @@
         <div class="chatty-virtual-window"></div>
         <div class="chatty-virtual-spacer chatty-virtual-bottom" aria-hidden="true"></div>
       </div>
+      <section class="chatty-thread" aria-label="Message thread" hidden>
+        <header class="chatty-thread-header">
+          <button type="button" class="chatty-thread-close" aria-label="Close thread">&#8592;</button>
+          <strong>Thread</strong>
+          <span class="chatty-thread-count"></span>
+        </header>
+        <div class="chatty-thread-list"></div>
+      </section>
       <button type="button" class="chatty-jump" hidden>Jump to latest</button>
       <div class="chatty-autocomplete" role="listbox" aria-label="7TV emotes" hidden></div>
       <div class="chatty-emote-card" role="tooltip" hidden>
@@ -228,6 +320,7 @@
     panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
     panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
     panel.querySelector(".chatty-prediction-open").addEventListener("click", openNativePrediction);
+    panel.querySelector(".chatty-thread-close").addEventListener("click", closeThread);
     panel.querySelector(".chatty-save").addEventListener("click", savePanelSettings);
     for (const tab of panel.querySelectorAll("[data-settings-tab]")) {
       tab.addEventListener("click", switchSettingsTab);
@@ -254,9 +347,21 @@
   }
 
   function syncNativeComposer(host) {
-    const composer =
-      host.querySelector(".chat-input") ||
-      document.querySelector(".chat-input");
+    const composer = uniqueSelectorMatches([".chat-input"], host)
+      .map((node, index) => ({
+        node,
+        index,
+        input: Boolean(node.querySelector(SELECTORS.nativeInput)),
+        send: Boolean(node.querySelector("[data-a-target='chat-send-button']")),
+        layout: elementLayoutScore(node)
+      }))
+      .sort((left, right) =>
+        compareLayoutRank(left, right) ||
+        Number(right.input) - Number(left.input) ||
+        Number(right.send) - Number(left.send) ||
+        left.index - right.index
+      )[0]
+      ?.node || null;
     if (!composer) {
       setStatus("Waiting for Twitch composer\u2026");
       return;
@@ -594,7 +699,7 @@
 
   function setStatus(text) {
     const node = state.root?.querySelector(".chatty-status");
-    if (node) node.textContent = text;
+    if (node && node.textContent !== text) node.textContent = text;
   }
 
   function virtualViewportHeight() {
@@ -788,6 +893,18 @@
     });
   }
 
+  function pageFeatureMutationRecords(records) {
+    const host = state.root?.parentElement;
+    if (!host) return [];
+    return records.filter((record) => {
+      const target = record.target;
+      if (!target || (target !== host && !host.contains(target))) return false;
+      if (state.root?.contains(target)) return false;
+      if (state.nativeContainer?.contains(target)) return false;
+      return true;
+    });
+  }
+
   function openNativePinned() {
     const nativePinned = Array.from(document.querySelectorAll(SELECTORS.pinned))
       .find((node) => !state.root?.contains(node));
@@ -823,7 +940,8 @@
       ".community-highlight-stack__card--wide",
       ".community-highlight"
     ].join(",");
-    for (const marker of document.querySelectorAll(SELECTORS.prediction)) {
+    const scope = state.root?.parentElement || document;
+    for (const marker of scope.querySelectorAll(SELECTORS.prediction)) {
       if (state.root?.contains(marker)) continue;
       const root = marker.closest(rootSelector) || marker;
       if (!state.root?.contains(root)) return root;
@@ -959,27 +1077,123 @@
   }
 
   function findNativeContainer(shell) {
-    for (const selector of SELECTORS.scroll) {
-      const node = shell.querySelector(selector);
-      if (node) return node;
-    }
+    const container = uniqueSelectorMatches(SELECTORS.scroll, shell)
+      .map((node, index) => ({
+        node,
+        index,
+        messages: node.querySelectorAll(SELECTORS.message).length,
+        layout: elementLayoutScore(node)
+      }))
+      .sort((left, right) =>
+        compareLayoutRank(left, right) ||
+        right.messages - left.messages ||
+        left.index - right.index
+      )[0]
+      ?.node;
+    if (container) return container;
     const message = shell.querySelector(SELECTORS.message);
     return message?.parentElement || null;
   }
 
+  function replyIdentity(username, text) {
+    const user = String(username || "").replace(/^@/, "").trim().toLowerCase();
+    const body = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return `${user}|${body}`;
+  }
+
+  function findReplyContextNode(node) {
+    const structured = Array.from(node.querySelectorAll(SELECTORS.replyContext))
+      .find((candidate) => candidate !== node);
+    if (structured) return structured;
+    if (!/^Replying to\b/i.test(node.getAttribute("aria-label") || "")) return null;
+    return Array.from(node.querySelectorAll("p")).find((candidate) =>
+      /^Replying to\b/i.test(candidate.textContent?.replace(/\s+/g, " ").trim() || "")
+    ) || null;
+  }
+
+  function firstOutsideContext(node, selector, context) {
+    return Array.from(node.querySelectorAll(selector)).find((candidate) =>
+      !context?.contains(candidate)
+    ) || null;
+  }
+
+  function currentUsernameNode(node, context = findReplyContextNode(node)) {
+    return firstOutsideContext(node, "[data-a-target='chat-message-username']", context) ||
+      firstOutsideContext(node, "[data-a-user]", context) ||
+      firstOutsideContext(node, ".chat-author__display-name", context);
+  }
+
+  function currentMessageBody(node, context = findReplyContextNode(node)) {
+    return firstOutsideContext(node, "[data-a-target='chat-line-message-body']", context) ||
+      firstOutsideContext(node, ".text-fragment", context)?.parentElement ||
+      node;
+  }
+
+  function readReplyContext(node) {
+    const context = findReplyContextNode(node);
+    if (!context) return null;
+
+    const parentUserNode = context.querySelector([
+      "[data-a-target*='reply-context-username' i]",
+      "[data-test-selector*='reply-context-username' i]",
+      "[data-a-target*='reply-parent-user' i]",
+      "[data-test-selector*='reply-parent-user' i]",
+      "[data-a-user]"
+    ].join(","));
+    const parentBodyNode = context.querySelector([
+      "[data-a-target*='reply-context-body' i]",
+      "[data-test-selector*='reply-context-body' i]",
+      "[data-a-target*='reply-message-body' i]",
+      "[data-test-selector*='reply-message-body' i]",
+      "[data-a-target*='reply-text' i]",
+      "[data-test-selector*='reply-text' i]"
+    ].join(","));
+    let parentUsername =
+      context.getAttribute("data-reply-parent-user-login") ||
+      context.getAttribute("data-reply-parent-display-name") ||
+      parentUserNode?.getAttribute("data-a-user") ||
+      parentUserNode?.textContent ||
+      "";
+    let parentText = parentBodyNode
+      ? collectFragments(parentBodyNode)
+        .map((fragment) => fragment.value || fragment.alt || "")
+        .join("")
+      : "";
+
+    const raw = context.textContent?.replace(/\s+/g, " ").trim() || "";
+    const parsed = raw.match(/^Replying to\s+@?([^:]+):\s*(.*)$/i);
+    if (!parentUsername && parsed) parentUsername = parsed[1];
+    if (!parentText && parsed) parentText = parsed[2];
+    if (!parentUsername) {
+      parentUsername = (node.getAttribute("aria-label") || "")
+        .match(/^Replying to\s+([^,]+)/i)?.[1] || "";
+    }
+
+    parentUsername = parentUsername.replace(/^@/, "").trim();
+    parentText = parentText.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!parentUsername && !parentText) return null;
+    const parentMessageId =
+      context.getAttribute("data-reply-parent-msg-id") ||
+      context.getAttribute("data-reply-parent-message-id") ||
+      context.getAttribute("data-parent-message-id") ||
+      "";
+    return {
+      parentMessageId,
+      parentUsername,
+      parentText,
+      signature: replyIdentity(parentUsername, parentText)
+    };
+  }
+
   function readMessage(node) {
-    const usernameNode =
-      node.querySelector("[data-a-user]") ||
-      node.querySelector("[data-a-target='chat-message-username']") ||
-      node.querySelector(".chat-author__display-name");
+    const reply = readReplyContext(node);
+    const replyContext = findReplyContextNode(node);
+    const usernameNode = currentUsernameNode(node, replyContext);
     const username =
       usernameNode?.getAttribute("data-a-user") ||
       usernameNode?.textContent?.trim() ||
       "";
-    const body =
-      node.querySelector("[data-a-target='chat-line-message-body']") ||
-      node.querySelector(".text-fragment")?.parentElement ||
-      node;
+    const body = currentMessageBody(node, replyContext);
     const fragments = collectFragments(body);
     const text = fragments
       .map((fragment) => fragment.value || fragment.alt || "")
@@ -997,7 +1211,7 @@
       "#adadb8";
     const badges = Array.from(
       node.querySelectorAll("img.chat-badge, [data-a-target='chat-badge'] img, img[alt$='Badge']")
-    ).map((image) => ({
+    ).filter((image) => !replyContext?.contains(image)).map((image) => ({
       src: image.currentSrc || image.src,
       previewSrc: highResolutionBadgeUrl(image),
       alt: image.alt || "badge"
@@ -1014,9 +1228,118 @@
       badges,
       fragments,
       reward,
+      reply,
       usernameNode,
       nativeNode: node
     };
+  }
+
+  function messageIdentity(message) {
+    return replyIdentity(message?.username, message?.text);
+  }
+
+  function findReplyParentIndex(reply, beforeIndex) {
+    if (!reply) return -1;
+    for (let index = Math.min(beforeIndex - 1, state.messages.length - 1); index >= 0; index -= 1) {
+      const candidate = state.messages[index];
+      if (reply.parentMessageId && candidate.id === reply.parentMessageId) return index;
+      if (messageIdentity(candidate) === reply.signature) return index;
+    }
+    return -1;
+  }
+
+  function loadedThreadMessages(anchor) {
+    let currentIndex = state.messages.indexOf(anchor);
+    if (currentIndex < 0) {
+      currentIndex = state.messages.findIndex((message) => message.id === anchor?.id);
+    }
+    let current = currentIndex >= 0 ? state.messages[currentIndex] : anchor;
+    let rootSignature = messageIdentity(current);
+    let syntheticRoot = null;
+    const visited = new Set();
+
+    while (current?.reply && !visited.has(rootSignature)) {
+      visited.add(rootSignature);
+      const parentIndex = findReplyParentIndex(current.reply, currentIndex);
+      if (parentIndex < 0) {
+        rootSignature = current.reply.signature;
+        syntheticRoot = {
+          id: `thread-parent-${rootSignature}`,
+          username: current.reply.parentUsername,
+          text: current.reply.parentText,
+          timestamp: current.timestamp,
+          fragments: [{ type: "text", value: current.reply.parentText }],
+          synthetic: true
+        };
+        break;
+      }
+      currentIndex = parentIndex;
+      current = state.messages[currentIndex];
+      rootSignature = messageIdentity(current);
+    }
+
+    const known = new Set([rootSignature]);
+    const loaded = [];
+    for (const message of state.messages) {
+      const identity = messageIdentity(message);
+      if (known.has(identity) || (message.reply && known.has(message.reply.signature))) {
+        loaded.push(message);
+        known.add(identity);
+      }
+    }
+    if (syntheticRoot && !loaded.some((message) => messageIdentity(message) === rootSignature)) {
+      loaded.unshift(syntheticRoot);
+    }
+    if (anchor && !loaded.some((message) => message.id === anchor.id)) loaded.push(anchor);
+    return loaded;
+  }
+
+  function createThreadMessage(message) {
+    const entry = document.createElement("article");
+    entry.className = "chatty-thread-message";
+    const meta = document.createElement("div");
+    meta.className = "chatty-thread-meta";
+    const user = document.createElement("strong");
+    user.className = "chatty-thread-user";
+    user.textContent = `@${message.username || "unknown"}`;
+    const time = document.createElement("time");
+    time.textContent = new Date(message.timestamp || Date.now()).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    meta.append(user, time);
+    const body = document.createElement("div");
+    body.className = "chatty-thread-text";
+    appendFragments(body, message.fragments || [{ type: "text", value: message.text || "" }]);
+    entry.append(meta, body);
+    return entry;
+  }
+
+  function renderThread(anchor = state.threadAnchor) {
+    if (!state.root || !anchor) return;
+    const panel = state.root.querySelector(".chatty-thread");
+    const list = panel.querySelector(".chatty-thread-list");
+    const messages = loadedThreadMessages(anchor);
+    list.replaceChildren(...messages.map(createThreadMessage));
+    const replyCount = Math.max(0, messages.length - 1);
+    panel.querySelector(".chatty-thread-count").textContent =
+      `${replyCount} ${replyCount === 1 ? "reply" : "replies"} loaded`;
+  }
+
+  function openThread(message) {
+    state.threadAnchor = message;
+    renderThread(message);
+    state.root.querySelector(".chatty-thread").hidden = false;
+  }
+
+  function closeThread() {
+    state.threadAnchor = null;
+    const panel = state.root?.querySelector(".chatty-thread");
+    if (panel) panel.hidden = true;
+  }
+
+  function holdReplyInteraction() {
+    state.replyInteractionUntil = Math.max(state.replyInteractionUntil, Date.now() + 650);
   }
 
   function createMessageRow(message) {
@@ -1037,6 +1360,28 @@
       minute: "2-digit"
     });
     row.append(time);
+
+    if (message.reply) {
+      const context = document.createElement("button");
+      context.type = "button";
+      context.className = "chatty-reply-context";
+      context.title = `View thread \u2014 replying to ${message.reply.parentUsername}: ${message.reply.parentText}`;
+      context.setAttribute(
+        "aria-label",
+        `Open thread. Replying to ${message.reply.parentUsername}: ${message.reply.parentText}`
+      );
+      const arrow = document.createElement("span");
+      arrow.className = "chatty-reply-context-arrow";
+      arrow.textContent = "\u21b3";
+      const user = document.createElement("strong");
+      user.textContent = `@${message.reply.parentUsername}`;
+      const snippet = document.createElement("span");
+      snippet.className = "chatty-reply-context-text";
+      snippet.textContent = message.reply.parentText || "Parent message";
+      context.append(arrow, user, snippet);
+      context.addEventListener("click", () => openThread(message));
+      row.append(context);
+    }
 
     const badges = document.createElement("span");
     badges.className = "chatty-badges";
@@ -1078,6 +1423,9 @@
     reply.textContent = "↩";
     reply.title = `Reply to ${message.username}`;
     reply.setAttribute("aria-label", `Reply to ${message.username}`);
+    for (const eventName of ["pointerenter", "pointermove", "pointerdown", "focus"]) {
+      reply.addEventListener(eventName, holdReplyInteraction);
+    }
     reply.addEventListener("click", (event) => {
       event.stopPropagation();
       openNativeReply(message);
@@ -1151,6 +1499,15 @@
 
   function scheduleVirtualRender() {
     if (state.virtualRenderFrame) return;
+    const interactionDelay = state.replyInteractionUntil - Date.now();
+    if (interactionDelay > 0) {
+      state.virtualRenderFrame = 1;
+      setTimeout(() => {
+        state.virtualRenderFrame = 0;
+        scheduleVirtualRender();
+      }, interactionDelay);
+      return;
+    }
     state.virtualRenderFrame = 1;
     queueMicrotask(() => {
       state.virtualRenderFrame = 0;
@@ -1248,6 +1605,7 @@
       nativeNode: null
     });
     trimMessageHistory();
+    if (state.threadAnchor) renderThread(state.threadAnchor);
     if (state.followLatest) state.unreadCount = 0;
     else state.unreadCount += 1;
     state.virtualDirty = true;
@@ -1401,32 +1759,53 @@
     const expectedUser = String(message.username || "").trim().toLowerCase();
     const expectedText = normalizeEchoText(message.text);
     return candidates.find((node) => {
-      const usernameNode =
-        node.querySelector("[data-a-user]") ||
-        node.querySelector("[data-a-target='chat-message-username']");
+      const replyContext = findReplyContextNode(node);
+      const usernameNode = currentUsernameNode(node, replyContext);
       const username = (
         usernameNode?.getAttribute("data-a-user") ||
         usernameNode?.textContent ||
         ""
       ).trim().toLowerCase();
-      const body =
-        node.querySelector("[data-a-target='chat-line-message-body']") ||
-        node.querySelector(".text-fragment")?.parentElement;
+      const body = currentMessageBody(node, replyContext);
       if (!body) return false;
       const text = collectFragments(body)
         .map((fragment) => fragment.value || fragment.alt || "")
         .join("");
-      return username === expectedUser && normalizeEchoText(text) === expectedText;
+      if (username !== expectedUser || normalizeEchoText(text) !== expectedText) return false;
+      if (!message.reply) return true;
+      return readReplyContext(node)?.signature === message.reply.signature;
     }) || null;
   }
 
+  function nativeReplyScopes(messageNode) {
+    if (!messageNode) return [];
+    const scopes = [messageNode];
+    let parent = messageNode.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1) {
+      if (state.nativeContainer && !state.nativeContainer.contains(parent)) break;
+      if (parent.querySelectorAll(SELECTORS.message).length > 1) break;
+      scopes.push(parent);
+      parent = parent.parentElement;
+    }
+    return scopes;
+  }
+
   function nativeReplyButton(messageNode) {
-    return messageNode?.querySelector([
+    const selector = [
+      "button[data-test-selector='chat-reply-button']",
+      "[data-test-selector='chat-reply-button'] button",
       "[data-a-target='chat-message-reply-button']",
       "button[data-test-selector='chat-message-reply-button']",
+      ".chat-line__reply-icon button",
+      "button[aria-label^='Click to reply to @' i]",
       "button[aria-label^='Reply to ' i]",
       "button[aria-label='Reply' i]"
-    ].join(","));
+    ].join(",");
+    for (const scope of nativeReplyScopes(messageNode)) {
+      const button = scope.querySelector(selector);
+      if (button) return button;
+    }
+    return null;
   }
 
   function openNativeReply(message) {
@@ -1436,11 +1815,15 @@
       return;
     }
 
-    nativeMessage.dispatchEvent(new MouseEvent("mouseover", {
-      bubbles: true,
-      cancelable: true,
-      view: window
-    }));
+    for (const scope of nativeReplyScopes(nativeMessage)) {
+      for (const type of ["pointerover", "mouseover", "mouseenter"]) {
+        scope.dispatchEvent(new MouseEvent(type, {
+          bubbles: type !== "mouseenter",
+          cancelable: true,
+          view: window
+        }));
+      }
+    }
     const activate = () => {
       const button = nativeReplyButton(nativeMessage);
       if (!button) return false;
@@ -1449,9 +1832,17 @@
       return true;
     };
     if (!activate()) {
-      setTimeout(() => {
-        if (!activate()) setStatus(`Reply unavailable for ${message.username}`);
-      }, 50);
+      let attempts = 0;
+      const retry = () => {
+        if (activate()) return;
+        attempts += 1;
+        if (attempts >= 12) {
+          setStatus(`Reply unavailable for ${message.username}`);
+          return;
+        }
+        setTimeout(retry, 25);
+      };
+      setTimeout(retry, 25);
     }
   }
 
@@ -1539,6 +1930,8 @@
     state.virtualEnd = -1;
     state.virtualRenderFrame = 0;
     state.virtualDirty = false;
+    state.replyInteractionUntil = 0;
+    state.threadAnchor = null;
     state.followLatest = true;
     state.nativeContainer = null;
     state.nativeComposer = null;
@@ -1560,13 +1953,28 @@
   async function mount() {
     if (!state.settings.enabled) return;
     const channel = channelFromLocation();
-    const shell = first(SELECTORS.chatShell);
+    const readyShell = findChatShell(true);
+    const shell = readyShell || findChatShell();
     if (!channel || !shell) return;
-    if (state.root && state.channel === channel && state.root.isConnected) return;
+    const host = shell.querySelector(".chat-room__content") || shell;
+    if (
+      state.root &&
+      state.channel === channel &&
+      state.root.isConnected &&
+      state.root.parentElement === host &&
+      state.nativeContainer?.isConnected &&
+      state.nativeContainer === findNativeContainer(shell)
+    ) {
+      syncNativeComposer(host);
+      return;
+    }
+    if (state.root?.isConnected && state.channel === channel && !readyShell) {
+      setStatus("Waiting for chat…");
+      return;
+    }
 
     unmount();
     state.channel = channel;
-    const host = shell.querySelector(".chat-room__content") || shell;
     buildPanel(host);
     const nativeContainer = findNativeContainer(shell);
     if (!nativeContainer) {
@@ -1579,30 +1987,48 @@
   }
 
   function scheduleMount() {
-    clearTimeout(state.rescanTimer);
-    state.rescanTimer = setTimeout(mount, 350);
+    if (state.rescanTimer) return;
+    state.rescanTimer = setTimeout(() => {
+      state.rescanTimer = 0;
+      mount();
+    }, 100);
   }
 
   async function boot() {
     const stored = await chrome.storage.sync.get("chattySettings");
     state.settings = core.sanitizeSettings(stored.chattySettings);
     const pageObserver = new MutationObserver((records) => {
+      const externalRecords = records.filter((record) => !state.root?.contains(record.target));
       if (window.location.href !== state.route) {
         state.route = window.location.href;
         scheduleMount();
       } else if (!state.root?.isConnected) {
         scheduleMount();
+      } else if (
+        !state.nativeContainer?.isConnected &&
+        mutationsTouchSelector(externalRecords, SELECTORS.chatReady)
+      ) {
+        scheduleMount();
       }
-      if (state.root && !state.nativeComposer?.isConnected) {
+      const featureRecords = pageFeatureMutationRecords(records);
+      if (
+        featureRecords.length &&
+        state.root?.isConnected &&
+        !state.nativeComposer?.isConnected &&
+        mutationsTouchSelector(featureRecords, SELECTORS.composer)
+      ) {
         syncNativeComposer(state.root.parentElement);
       }
-      if (state.root && mutationsTouchSelector(records, SELECTORS.pinned)) {
+      if (featureRecords.length && mutationsTouchSelector(featureRecords, SELECTORS.pinned)) {
         syncPinnedMessage();
       }
-      if (state.root && mutationsTouchSelector(records, SELECTORS.prediction)) {
+      if (
+        featureRecords.length &&
+        mutationsTouchSelector(featureRecords, SELECTORS.predictionMutation)
+      ) {
         syncPrediction();
       }
-      if (state.root && mutationsTouchSelector(records, SELECTORS.pointsClaim)) {
+      if (featureRecords.length && mutationsTouchSelector(featureRecords, SELECTORS.pointsClaim)) {
         schedulePointsScan();
       }
     });
