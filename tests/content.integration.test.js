@@ -8,52 +8,105 @@ const { JSDOM } = require("jsdom");
 
 const coreSource = fs.readFileSync(path.join(__dirname, "../src/core.js"), "utf8");
 const contentSource = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8");
+const twitchCssSource = fs.readFileSync(path.join(__dirname, "../src/twitch.css"), "utf8");
+
+async function waitFor(window, predicate, timeoutMs = 500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => window.setTimeout(resolve, 5));
+  }
+  return predicate();
+}
 
 async function createFixture(options = {}) {
+  const viewerName = options.viewerName || "viewer";
+  const composerMarkup = options.includeComposer === false ? "" : `
+    <div class="chat-input">
+      <div data-test-selector="community-points-summary">
+        <button aria-label="Bits and Points Balances">
+          <span data-test-selector="bits-balance-string"><span class="ScAnimatedNumber-sc-test">10</span></span><span data-test-selector="copo-balance-string"><span class="ScAnimatedNumber-sc-test">13.3K</span></span>
+        </button>
+      </div>
+      <button aria-label="Claim Bonus">Claim</button>
+      <div
+        data-a-target="chat-input"
+        contenteditable="true"
+        role="textbox"
+      ></div>
+      <button data-a-target="chat-send-button">Chat</button>
+    </div>
+  `;
+  const predictionMarkup = options.prediction ? `
+    <section data-test-selector="community-prediction-highlight">
+      <strong data-test-selector="prediction-title">${options.prediction.title}</strong>
+      <div data-test-selector="prediction-outcomes">
+        ${options.prediction.outcomes.map((outcome) => `
+          <div data-test-selector="prediction-outcome">
+            <span data-test-selector="prediction-outcome-title">${outcome.title}</span>
+            <span data-test-selector="prediction-outcome-points">${outcome.detail}</span>
+          </div>
+        `).join("")}
+      </div>
+      <span data-test-selector="prediction-status">${options.prediction.status || "Predict now"}</span>
+      <button data-test-selector="prediction-details">View Prediction</button>
+    </section>
+  ` : "";
   const dom = new JSDOM(`<!doctype html>
     <html><body>
+      <button data-a-target="user-menu-toggle"><img alt="${viewerName}"></button>
       <div class="stream-chat">
         <div class="stream-chat-header">STREAM CHAT</div>
         <section data-test-selector="chat-room-component-layout">
           <div class="chat-room__content">
-            <div class="native-pinned">Pinned content</div>
+            <div class="pinned-chat__highlight-card">
+              <div class="pinned-chat__pinned-by">Pinned by modJane</div>
+              <p class="pinned-chat__message">
+                Read the <a href="https://example.com/rules">channel rules</a>
+              </p>
+              <button aria-label="Expand">Expand</button>
+            </div>
+            ${predictionMarkup}
             <div data-a-target="chat-scroller">
-              <div class="chat-line__message" data-id="message-1">
-                <img
-                  class="chat-badge"
-                  alt="Moderator, examplechannel"
-                  src="https://static-cdn.jtvnw.net/badges/v1/moderator/1/2"
-                >
+              <div class="native-message-wrapper">
+                <div class="chat-line__message" data-id="message-1">
+                  <img
+                    class="chat-badge"
+                    alt="Moderator, examplechannel"
+                    src="https://static-cdn.jtvnw.net/badges/v1/moderator/1/2"
+                  >
+                  <span
+                    class="chat-author__display-name"
+                    data-a-target="chat-message-username"
+                    data-a-user="alice"
+                    style="color: rgb(255, 0, 100)"
+                  >alice</span>
+                  <span data-a-target="chat-line-message-body">
+                    hello <a href="https://example.com/news">example.com/news</a>
+                    <img
+                      alt="Kappa"
+                      src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"
+                    >
+                  </span>
+                </div>
+                <div class="chat-line__reply-icon">
+                  <button aria-label="Click to reply to @alice">Reply</button>
+                </div>
+              </div>
+              <div class="chat-line__message" data-id="message-filtered">
                 <span
                   class="chat-author__display-name"
                   data-a-target="chat-message-username"
-                  data-a-user="alice"
-                  style="color: rgb(255, 0, 100)"
-                >alice</span>
+                  data-a-user="bob"
+                >bob</span>
                 <span data-a-target="chat-line-message-body">
-                  hello
-                  <img
-                    alt="Kappa"
-                    src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0"
-                  >
+                  <button data-a-target="chat-message-blocked">Show message</button>
                 </span>
               </div>
             </div>
             <div class="native-shared-chat">Shared Chat</div>
-            <div class="chat-input">
-              <div data-test-selector="community-points-summary">
-                <button aria-label="Bits and Points Balances">
-                  <span data-test-selector="bits-balance-string"><span class="ScAnimatedNumber-sc-test">10</span></span><span data-test-selector="copo-balance-string"><span class="ScAnimatedNumber-sc-test">13.3K</span></span>
-                </button>
-              </div>
-              <button aria-label="Claim Bonus">Claim</button>
-              <div
-                data-a-target="chat-input"
-                contenteditable="true"
-                role="textbox"
-              ></div>
-              <button data-a-target="chat-send-button">Chat</button>
-            </div>
+            ${composerMarkup}
             <div class="chat-room__viewer-card" data-a-target="chat-user-card"></div>
           </div>
         </section>
@@ -65,6 +118,87 @@ async function createFixture(options = {}) {
   });
 
   const { window } = dom;
+  const nativeDocumentQuerySelectorAll =
+    window.document.querySelectorAll.bind(window.document);
+  const nativeElementMatches = window.Element.prototype.matches;
+  const nativeElementClosest = window.Element.prototype.closest;
+  const nativeElementQuerySelector = window.Element.prototype.querySelector;
+  const NativeMutationObserver = window.MutationObserver;
+  let pinnedQueryCount = 0;
+  let pageFeatureSelectorChecks = 0;
+  let pageObserverCallbackCount = 0;
+  let pageObserverCallbackCapHit = false;
+  window.MutationObserver = class InstrumentedMutationObserver {
+    constructor(callback) {
+      this.isPageObserver = false;
+      this.delegate = new NativeMutationObserver((records) => {
+        if (this.isPageObserver) {
+          pageObserverCallbackCount += 1;
+          if (pageObserverCallbackCount > 100) {
+            pageObserverCallbackCapHit = true;
+            return;
+          }
+        }
+        callback(records, this);
+      });
+    }
+
+    observe(target, observerOptions) {
+      this.isPageObserver = target === window.document.documentElement &&
+        Boolean(observerOptions?.childList) && Boolean(observerOptions?.subtree);
+      this.delegate.observe(target, observerOptions);
+    }
+
+    disconnect() {
+      this.delegate.disconnect();
+    }
+
+    takeRecords() {
+      return this.delegate.takeRecords();
+    }
+  };
+  const isPageFeatureSelector = (selector) =>
+    typeof selector === "string" && (
+      selector === ".pinned-chat__highlight-card" ||
+      selector.includes("community-prediction-highlight") ||
+      selector.includes("Claim Bonus")
+    );
+  window.document.querySelectorAll = (selector) => {
+    if (selector === ".pinned-chat__highlight-card") pinnedQueryCount += 1;
+    return nativeDocumentQuerySelectorAll(selector);
+  };
+  window.Element.prototype.matches = function matches(selector) {
+    if (isPageFeatureSelector(selector)) pageFeatureSelectorChecks += 1;
+    return nativeElementMatches.call(this, selector);
+  };
+  window.Element.prototype.closest = function closest(selector) {
+    if (isPageFeatureSelector(selector)) pageFeatureSelectorChecks += 1;
+    return nativeElementClosest.call(this, selector);
+  };
+  window.Element.prototype.querySelector = function querySelector(selector) {
+    if (isPageFeatureSelector(selector)) pageFeatureSelectorChecks += 1;
+    return nativeElementQuerySelector.call(this, selector);
+  };
+  window.__chattyTestMetrics = {
+    get pinnedQueryCount() {
+      return pinnedQueryCount;
+    },
+    get pageFeatureSelectorChecks() {
+      return pageFeatureSelectorChecks;
+    },
+    get pageObserverCallbackCount() {
+      return pageObserverCallbackCount;
+    },
+    get pageObserverCallbackCapHit() {
+      return pageObserverCallbackCapHit;
+    },
+    reset() {
+      pinnedQueryCount = 0;
+      pageFeatureSelectorChecks = 0;
+      pageObserverCallbackCount = 0;
+      pageObserverCallbackCapHit = false;
+    }
+  };
   window.chrome = {
     runtime: {
       sendMessage: async () => ({
@@ -108,6 +242,51 @@ async function createFixture(options = {}) {
       .querySelector("[aria-label='Claim Bonus']")
       .addEventListener("click", options.onClaim);
   }
+  if (options.onPointsOpen) {
+    window.document
+      .querySelector("[data-test-selector='community-points-summary'] button")
+      .addEventListener("click", options.onPointsOpen);
+  }
+  if (options.onPredictionOpen) {
+    window.document
+      .querySelector("[data-test-selector='prediction-details']")
+      ?.addEventListener("click", options.onPredictionOpen);
+  }
+  const nativeReply = window.document.querySelector(
+    ".native-message-wrapper .chat-line__reply-icon button"
+  );
+  if (options.lazyReply) {
+    const nativeMessage = nativeReply.closest(".chat-line__message");
+    const nativeWrapper = nativeReply.closest(".native-message-wrapper");
+    nativeReply.remove();
+    const revealReply = () => {
+      if (nativeWrapper.querySelector("[data-test-selector='chat-reply-button']")) return;
+      window.setTimeout(() => {
+        if (nativeWrapper.querySelector("[data-test-selector='chat-reply-button']")) return;
+        const reply = window.document.createElement("button");
+        reply.dataset.testSelector = "chat-reply-button";
+        reply.setAttribute("aria-label", "Responder a @alice");
+        reply.textContent = "Reply";
+        if (options.onReply) reply.addEventListener("click", options.onReply);
+        nativeWrapper.querySelector(".chat-line__reply-icon").append(reply);
+      }, 80);
+    };
+    nativeWrapper.addEventListener("pointerover", revealReply);
+    nativeWrapper.addEventListener("mouseover", revealReply);
+  } else if (options.onReply) {
+    nativeReply.addEventListener("click", options.onReply);
+  }
+  window.document
+    .querySelector("[data-a-target='chat-message-blocked']")
+    .addEventListener("click", (event) => {
+      const body = event.currentTarget.parentElement;
+      event.currentTarget.remove();
+      const revealed = window.document.createElement("span");
+      revealed.setAttribute("data-a-target", "chat-message-text");
+      revealed.textContent = "this damn filter is visible";
+      body.append(revealed);
+    });
+  options.beforeBoot?.(window);
   window.eval(coreSource);
   window.eval(contentSource);
   await new Promise((resolve) => window.setTimeout(resolve, 25));
@@ -127,6 +306,102 @@ test("Chatty overlays the chat content and owns the visible composer", async () 
   assert.ok(panel.querySelector("[data-setting='autoOpenLive']"));
 });
 
+test("a delayed Twitch composer binds without a self-triggering observer loop", async () => {
+  const dom = await createFixture({ includeComposer: false });
+  const { document } = dom.window;
+  const metrics = dom.window.__chattyTestMetrics;
+
+  assert.equal(
+    metrics.pageObserverCallbackCapHit,
+    false,
+    "Chatty must not keep mutating its own waiting status while Twitch is still loading"
+  );
+  assert.ok(
+    metrics.pageObserverCallbackCount <= 8,
+    `expected a bounded startup observer count, received ${metrics.pageObserverCallbackCount}`
+  );
+
+  const composer = document.createElement("div");
+  composer.className = "chat-input";
+  composer.innerHTML = `
+    <div data-a-target="chat-input" contenteditable="true" role="textbox"></div>
+    <button data-a-target="chat-send-button">Chat</button>
+  `;
+  document.querySelector(".chat-room__content").append(composer);
+
+  await waitFor(dom.window, () => composer.classList.contains("chatty-native-composer"));
+  assert.equal(composer.classList.contains("chatty-native-composer"), true);
+  assert.ok(
+    metrics.pageObserverCallbackCount <= 12,
+    `expected one bounded composer reconnect, received ${metrics.pageObserverCallbackCount} callbacks`
+  );
+});
+
+test("a delayed Twitch chat room replaces the early fallback mount and hydrates chat", async () => {
+  const dom = await createFixture({
+    beforeBoot(window) {
+      const realShell = window.document.querySelector(".stream-chat");
+      realShell.remove();
+      const fallback = window.document.createElement("div");
+      fallback.dataset.aTarget = "right-column-chat-bar";
+      window.document.body.append(fallback);
+      window.__deferredChatShell = realShell;
+      window.__chattyFallbackShell = fallback;
+    }
+  });
+  const { document } = dom.window;
+  const fallback = dom.window.__chattyFallbackShell;
+
+  assert.equal(document.querySelector("#chatty-panel")?.parentElement, fallback);
+  assert.equal(document.querySelector(".chatty-status")?.textContent, "Waiting for chat…");
+  fallback.append(dom.window.__deferredChatShell);
+
+  const hydratedMessage = await waitFor(
+    dom.window,
+    () => document.querySelector(".chatty-message[data-message-id='message-1']"),
+    1000
+  );
+  const panel = document.querySelector("#chatty-panel");
+  assert.ok(hydratedMessage, "Chatty should recover when Twitch inserts the real chat room");
+  assert.ok(panel.parentElement.classList.contains("chat-room__content"));
+  assert.ok(document.documentElement.classList.contains("chatty-active"));
+  assert.ok(document.querySelector(".chatty-native-composer [data-a-target='chat-input']"));
+});
+
+test("a hidden placeholder chat shell cannot outrank the populated visible shell", async () => {
+  const dom = await createFixture({
+    beforeBoot(window) {
+      const liveShell = window.document.querySelector(".stream-chat");
+      liveShell.dataset.fixtureShell = "live";
+      liveShell.getBoundingClientRect = () => ({
+        width: 340,
+        height: 800,
+        top: 0,
+        right: 340,
+        bottom: 800,
+        left: 0,
+        x: 0,
+        y: 0,
+        toJSON() { return this; }
+      });
+      const placeholder = window.document.createElement("div");
+      placeholder.className = "stream-chat";
+      placeholder.dataset.fixtureShell = "placeholder";
+      placeholder.setAttribute("aria-hidden", "true");
+      window.document.body.insertBefore(placeholder, liveShell);
+    }
+  });
+  const { document } = dom.window;
+  const panel = document.querySelector("#chatty-panel");
+
+  assert.equal(panel.closest("[data-fixture-shell]")?.dataset.fixtureShell, "live");
+  assert.ok(panel.querySelector(".chatty-message[data-message-id='message-1']"));
+  assert.equal(
+    document.querySelector("[data-fixture-shell='placeholder'] #chatty-panel"),
+    null
+  );
+});
+
 test("username clicks delegate to Twitch's native user-card trigger", async () => {
   const dom = await createFixture();
   const { document, MouseEvent } = dom.window;
@@ -138,6 +413,121 @@ test("username clicks delegate to Twitch's native user-card trigger", async () =
     .querySelector(".chatty-name")
     .dispatchEvent(new MouseEvent("click", { bubbles: true }));
   assert.equal(clicks, 1);
+});
+
+test("the hover reply action delegates to Twitch's lazily rendered native reply", async () => {
+  let replies = 0;
+  const dom = await createFixture({
+    lazyReply: true,
+    onReply: () => { replies += 1; }
+  });
+  const { document } = dom.window;
+  const reply = document.querySelector(
+    ".chatty-message[data-message-id='message-1'] .chatty-reply"
+  );
+
+  assert.ok(reply);
+  assert.equal(reply.getAttribute("aria-label"), "Reply to alice");
+  reply.click();
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 300));
+  assert.equal(replies, 1);
+});
+
+test("an interacting reply target survives a busy-chat virtual rerender", async () => {
+  let replies = 0;
+  const dom = await createFixture({ onReply: () => { replies += 1; } });
+  const { document, Event } = dom.window;
+  const reply = document.querySelector(
+    ".chatty-message[data-message-id='message-1'] .chatty-reply"
+  );
+  reply.dispatchEvent(new Event("pointerenter"));
+
+  const incoming = document.createElement("div");
+  incoming.className = "chat-line__message";
+  incoming.dataset.id = "reply-rerender-race";
+  incoming.innerHTML = `
+    <span data-a-target="chat-message-username" data-a-user="fastchat">fastchat</span>
+    <span data-a-target="chat-line-message-body">new message</span>
+  `;
+  document.querySelector("[data-a-target='chat-scroller']").append(incoming);
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  assert.equal(reply.isConnected, true);
+  reply.click();
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+  assert.equal(replies, 1);
+});
+
+test("the reply action is a large right-edge target that only reveals on interaction", () => {
+  const rule = twitchCssSource.match(/\.chatty-reply\s*\{([^}]*)\}/)?.[1] || "";
+  const revealRule = twitchCssSource.match(
+    /\.chatty-message:hover \.chatty-reply,\s*\.chatty-reply:focus-visible\s*\{([^}]*)\}/
+  )?.[1] || "";
+  assert.match(rule, /position:\s*absolute/);
+  assert.match(rule, /right:\s*4px/);
+  assert.match(rule, /top:\s*50%/);
+  assert.match(rule, /width:\s*28px/);
+  assert.match(rule, /height:\s*28px/);
+  assert.match(rule, /z-index:\s*2/);
+  assert.match(rule, /opacity:\s*0/);
+  assert.match(rule, /pointer-events:\s*none/);
+  assert.match(revealRule, /opacity:\s*1/);
+  assert.match(revealRule, /pointer-events:\s*auto/);
+});
+
+test("incoming replies preview only their parent and open the loaded thread", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const replies = document.createElement("div");
+  replies.innerHTML = `
+    <div class="chat-line__message" data-id="thread-root">
+      <span data-a-target="chat-message-username" data-a-user="rootuser">rootuser</span>
+      <span data-a-target="chat-line-message-body">original thought</span>
+    </div>
+    <div class="chat-line__message" data-id="thread-reply-1"
+      aria-label="Replying to rootuser, bob: first reply">
+      <p class="chat-line__message--reply" data-a-target="chat-message-reply-context">
+        Replying to <span data-a-user="rootuser">@rootuser</span>:
+        <span data-a-target="reply-context-body">original thought</span>
+      </p>
+      <span data-a-target="chat-message-username" data-a-user="bob">bob</span>
+      <span data-a-target="chat-line-message-body">first reply</span>
+    </div>
+    <div class="chat-line__message" data-id="thread-reply-2"
+      aria-label="Replying to bob, carol: second reply">
+      <p class="chat-line__message--reply" data-a-target="chat-message-reply-context">
+        Replying to <span data-a-user="bob">@bob</span>:
+        <span data-a-target="reply-context-body">first reply</span>
+      </p>
+      <span data-a-target="chat-message-username" data-a-user="carol">carol</span>
+      <span data-a-target="chat-line-message-body">second reply</span>
+    </div>
+  `;
+  scroller.append(replies);
+
+  const nestedRow = await waitFor(dom.window, () => document.querySelector(
+    ".chatty-message[data-message-id='thread-reply-2']"
+  ));
+  assert.ok(nestedRow);
+  assert.equal(nestedRow.querySelector(".chatty-name").textContent, "carol");
+  const preview = nestedRow.querySelector(".chatty-reply-context");
+  assert.ok(preview);
+  assert.match(preview.textContent, /@bob/);
+  assert.match(preview.textContent, /first reply/);
+  assert.doesNotMatch(preview.textContent, /original thought/);
+
+  preview.click();
+  const thread = document.querySelector(".chatty-thread");
+  assert.equal(thread.hidden, false);
+  assert.match(thread.textContent, /rootuser/);
+  assert.match(thread.textContent, /original thought/);
+  assert.match(thread.textContent, /bob/);
+  assert.match(thread.textContent, /first reply/);
+  assert.match(thread.textContent, /carol/);
+  assert.match(thread.textContent, /second reply/);
+  thread.querySelector(".chatty-thread-close").click();
+  assert.equal(thread.hidden, true);
 });
 
 test("emote hover displays provider and emote ID", async () => {
@@ -161,6 +551,151 @@ test("Chatty exposes Twitch's real Slate composer instead of a synthetic bridge"
     document.querySelector(".chatty-host").style.getPropertyValue("--chatty-native-composer-height"),
     ""
   );
+});
+
+test("the current viewer's optimistic echo is not rendered twice", async () => {
+  const dom = await createFixture({ viewerName: "User Avatar" });
+  const { document, KeyboardEvent } = dom.window;
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const input = document.querySelector("[data-a-target='chat-input'][contenteditable='true']");
+  input.textContent = "sent once";
+  document.querySelector("[data-a-target='chat-send-button']").click();
+
+  for (const id of ["echo-local", "echo-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">sent once</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "sent once");
+  assert.equal(copies.length, 1);
+
+  input.textContent = "entered once";
+  input.dispatchEvent(new KeyboardEvent("keydown", {
+    key: "Enter",
+    bubbles: true,
+    cancelable: true
+  }));
+  for (const id of ["enter-local", "enter-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">entered once</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const enteredCopies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "entered once");
+  assert.equal(enteredCopies.length, 1);
+});
+
+test("outgoing echo deduplication survives Twitch replacing the composer controls", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const composer = document.querySelector(".chat-input");
+  const oldInput = composer.querySelector("[data-a-target='chat-input']");
+  const oldSend = composer.querySelector("[data-a-target='chat-send-button']");
+  const input = oldInput.cloneNode(true);
+  const send = oldSend.cloneNode(true);
+  oldInput.replaceWith(input);
+  oldSend.replaceWith(send);
+
+  input.textContent = "survives replacement";
+  send.click();
+
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  for (const id of ["replacement-local", "replacement-server"]) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">survives replacement</span>
+    `;
+    scroller.append(message);
+  }
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "survives replacement");
+  assert.equal(copies.length, 1);
+});
+
+test("a delayed third Twitch echo stays collapsed into one sent message", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  let now = 1000;
+  dom.window.Date.now = () => now;
+
+  const input = document.querySelector("[data-a-target='chat-input']");
+  input.textContent = "one send three echoes";
+  document.querySelector("[data-a-target='chat-send-button']").click();
+
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const appendEcho = (id) => {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = id;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+      <span data-a-target="chat-line-message-body">one send three echoes</span>
+    `;
+    scroller.append(message);
+  };
+
+  appendEcho("third-echo-local");
+  appendEcho("third-echo-confirmed");
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  now += 5000;
+  appendEcho("third-echo-reconciled");
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "one send three echoes");
+  assert.equal(copies.length, 1);
+});
+
+test("separate captured sends with the same text each remain visible once", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const input = document.querySelector("[data-a-target='chat-input']");
+  const send = document.querySelector("[data-a-target='chat-send-button']");
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+
+  const sendWithEchoes = async (prefix) => {
+    input.textContent = "intentional repeat";
+    send.click();
+    for (const suffix of ["local", "confirmed", "reconciled"]) {
+      const message = document.createElement("div");
+      message.className = "chat-line__message";
+      message.dataset.id = `${prefix}-${suffix}`;
+      message.innerHTML = `
+        <span data-a-target="chat-message-username" data-a-user="alice">alice</span>
+        <span data-a-target="chat-line-message-body">intentional repeat</span>
+      `;
+      scroller.append(message);
+    }
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+  };
+
+  await sendWithEchoes("repeat-one");
+  await sendWithEchoes("repeat-two");
+
+  const copies = Array.from(document.querySelectorAll(".chatty-message"))
+    .filter((message) => message.querySelector(".chatty-content")?.textContent === "intentional repeat");
+  assert.equal(copies.length, 2);
 });
 
 test("past messages are hydrated after the delayed 7TV emote set loads", async () => {
@@ -277,6 +812,11 @@ test("badge hover shows the Twitch badge name and provider", async () => {
     "Moderator, examplechannel"
   );
   assert.equal(card.querySelector(".chatty-emote-provider").textContent, "Twitch badge");
+  assert.match(
+    card.querySelector(".chatty-emote-preview").src,
+    /\/badges\/v1\/moderator\/1\/3$/,
+    "badge hover should use Twitch's highest-resolution badge asset"
+  );
 });
 
 test("auto-claim clicks an available bonus once", async () => {
@@ -286,4 +826,284 @@ test("auto-claim clicks an available bonus once", async () => {
     onClaim: () => { claims += 1; }
   });
   assert.equal(claims, 1);
+});
+
+test("message links preserve their URL and remain clickable", async () => {
+  const dom = await createFixture();
+  const link = dom.window.document.querySelector(
+    ".chatty-message[data-message-id='message-1'] .chatty-link"
+  );
+  assert.ok(link);
+  assert.equal(link.href, "https://example.com/news");
+  assert.equal(link.target, "_blank");
+  assert.match(link.rel, /noopener/);
+});
+
+test("filtered messages are automatically revealed and mirrored", async () => {
+  const dom = await createFixture();
+  const filtered = await waitFor(
+    dom.window,
+    () => dom.window.document.querySelector(
+      ".chatty-message[data-message-id='message-filtered'] .chatty-content"
+    )
+  );
+  assert.ok(filtered);
+  assert.match(filtered.textContent, /damn filter is visible/);
+  assert.doesNotMatch(filtered.textContent, /Show message/);
+});
+
+test("jump-to-latest control restores the bottom position", async () => {
+  const dom = await createFixture();
+  const { document, Event } = dom.window;
+  const list = document.querySelector(".chatty-list");
+  Object.defineProperties(list, {
+    scrollHeight: { configurable: true, value: 1000 },
+    clientHeight: { configurable: true, value: 200 },
+    scrollTop: { configurable: true, writable: true, value: 100 }
+  });
+  list.dispatchEvent(new Event("scroll"));
+  const jump = document.querySelector(".chatty-jump");
+  assert.equal(jump.hidden, false);
+  jump.click();
+  assert.equal(list.scrollTop, 1000);
+  assert.equal(jump.hidden, true);
+});
+
+test("pinned message UI includes attribution, content, and links", async () => {
+  const dom = await createFixture();
+  const pinned = dom.window.document.querySelector(".chatty-pinned");
+  assert.ok(pinned);
+  assert.equal(pinned.hidden, false);
+  assert.match(pinned.querySelector(".chatty-pinned-meta").textContent, /modJane/);
+  assert.match(pinned.querySelector(".chatty-pinned-content").textContent, /channel rules/);
+  assert.equal(
+    pinned.querySelector(".chatty-link").href,
+    "https://example.com/rules"
+  );
+});
+
+test("active Twitch predictions are mirrored and open the native voting UI", async () => {
+  let opens = 0;
+  const dom = await createFixture({
+    prediction: {
+      title: "Will the run finish under two hours?",
+      status: "2 minutes left",
+      outcomes: [
+        { title: "Yes", detail: "62% · 18.4K" },
+        { title: "No", detail: "38% · 11.2K" }
+      ]
+    },
+    onPredictionOpen: () => { opens += 1; }
+  });
+  const prediction = dom.window.document.querySelector(".chatty-prediction");
+
+  assert.ok(prediction);
+  assert.equal(prediction.hidden, false);
+  assert.equal(
+    prediction.querySelector(".chatty-prediction-title").textContent,
+    "Will the run finish under two hours?"
+  );
+  assert.equal(prediction.querySelectorAll(".chatty-prediction-outcome").length, 2);
+  assert.match(prediction.textContent, /62% · 18\.4K/);
+  prediction.querySelector(".chatty-prediction-open").click();
+  assert.equal(opens, 1);
+});
+
+test("the Predictions panel follows native prediction start and end mutations", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  const prediction = document.querySelector(".chatty-prediction");
+  assert.equal(prediction.hidden, true);
+
+  const native = document.createElement("section");
+  native.dataset.testSelector = "community-prediction-highlight";
+  native.innerHTML = `
+    <strong data-test-selector="prediction-title">Next match winner?</strong>
+    <div data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Blue</span>
+      <span data-test-selector="prediction-outcome-points">4.2K</span>
+    </div>
+    <div data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Red</span>
+      <span data-test-selector="prediction-outcome-points">3.7K</span>
+    </div>
+    <button data-test-selector="prediction-details">Predict</button>
+  `;
+  document.querySelector(".chat-room__content").prepend(native);
+  await waitFor(dom.window, () => prediction.hidden === false);
+  assert.match(prediction.textContent, /Next match winner/);
+
+  native.remove();
+  await waitFor(dom.window, () => prediction.hidden === true);
+  assert.equal(prediction.hidden, true);
+});
+
+test("ambiguous Prediction choices open Channel Points without selecting an outcome", async () => {
+  let pointsOpens = 0;
+  let outcomeClicks = 0;
+  const dom = await createFixture({
+    onPointsOpen: () => { pointsOpens += 1; }
+  });
+  const { document } = dom.window;
+  const native = document.createElement("section");
+  native.dataset.testSelector = "community-prediction-highlight";
+  native.innerHTML = `
+    <strong data-test-selector="prediction-title">Choose carefully</strong>
+    <button data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Left</span>
+    </button>
+    <button data-test-selector="prediction-outcome">
+      <span data-test-selector="prediction-outcome-title">Right</span>
+    </button>
+  `;
+  for (const outcome of native.querySelectorAll("button")) {
+    outcome.addEventListener("click", () => { outcomeClicks += 1; });
+  }
+  document.querySelector(".chat-room__content").prepend(native);
+  const panel = document.querySelector(".chatty-prediction");
+  await waitFor(dom.window, () => panel.hidden === false);
+
+  panel.querySelector(".chatty-prediction-open").click();
+  assert.equal(outcomeClicks, 0);
+  assert.equal(pointsOpens, 1);
+});
+
+test("moderators receive native-command quick actions", async () => {
+  const dom = await createFixture({ viewerName: "alice" });
+  const { document } = dom.window;
+  let sends = 0;
+  document
+    .querySelector("[data-a-target='chat-send-button']")
+    .addEventListener("click", () => { sends += 1; });
+  const timeout = document.querySelector(
+    ".chatty-message[data-message-id='message-filtered'] [data-mod-action='timeout']"
+  );
+  assert.ok(timeout);
+  timeout.click();
+  assert.equal(
+    document.querySelector("[data-a-target='chat-input']").textContent,
+    "/timeout bob 600"
+  );
+  assert.equal(sends, 1);
+});
+
+test("busy player and chat mutations do not scan unrelated page features", async () => {
+  const dom = await createFixture();
+  const { document } = dom.window;
+  dom.window.__chattyTestMetrics.reset();
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const player = document.createElement("main");
+  player.dataset.aTarget = "video-player";
+  document.body.prepend(player);
+
+  for (let index = 0; index < 30; index += 1) {
+    const playerUpdate = document.createElement("div");
+    playerUpdate.textContent = `player update ${index}`;
+    player.append(playerUpdate);
+
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = `burst-${index}`;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="burst">burst</span>
+      <span data-a-target="chat-line-message-body">message ${index}</span>
+    `;
+    scroller.append(message);
+    await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
+  }
+
+  assert.ok(
+    dom.window.__chattyTestMetrics.pinnedQueryCount <= 2,
+    `expected at most 2 pinned scans, received ${dom.window.__chattyTestMetrics.pinnedQueryCount}`
+  );
+  assert.ok(
+    dom.window.__chattyTestMetrics.pageFeatureSelectorChecks <= 6,
+    "native messages and Chatty's own rendering must not trigger page-feature subtree scans; " +
+      `received ${dom.window.__chattyTestMetrics.pageFeatureSelectorChecks}`
+  );
+});
+
+test("busy chat virtualizes history and renders older messages while scrolling", async () => {
+  const dom = await createFixture({ settings: { maxMessages: 2000 } });
+  const { document, Event } = dom.window;
+  const scroller = document.querySelector("[data-a-target='chat-scroller']");
+  const burst = document.createElement("div");
+
+  for (let index = 0; index < 400; index += 1) {
+    const message = document.createElement("div");
+    message.className = "chat-line__message";
+    message.dataset.id = `performance-${index}`;
+    message.innerHTML = `
+      <span data-a-target="chat-message-username" data-a-user="performance">performance</span>
+      <span data-a-target="chat-line-message-body">
+        <img src="https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/2.0" alt="Kappa">
+        message ${index}
+      </span>
+    `;
+    burst.append(message);
+  }
+
+  scroller.append(burst);
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  assert.ok(
+    document.querySelectorAll(".chatty-message").length <= 80,
+    "only the viewport and a small overscan buffer should exist in the live DOM"
+  );
+  assert.ok(document.querySelector("[data-message-id='performance-399']"));
+
+  const list = document.querySelector(".chatty-list");
+  list.scrollTop = 0;
+  list.dispatchEvent(new Event("scroll"));
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+
+  assert.ok(
+    document.querySelector("[data-message-id='performance-0']"),
+    "scrolling upward should render messages retained in the virtual history"
+  );
+
+  let simulatedScrollTop = 0;
+  Object.defineProperties(list, {
+    clientHeight: { configurable: true, get: () => 400 },
+    scrollHeight: { configurable: true, get: () => 6000 },
+    scrollTop: {
+      configurable: true,
+      get: () => simulatedScrollTop,
+      set: (value) => {
+        simulatedScrollTop = Math.max(0, Math.min(Number(value), 5600));
+      }
+    }
+  });
+  Object.defineProperty(document.querySelector(".chatty-virtual-window"), "scrollHeight", {
+    configurable: true,
+    get: () => 4000
+  });
+
+  const jump = document.querySelector(".chatty-jump");
+  jump.click();
+
+  assert.equal(
+    jump.hidden,
+    true,
+    "jump-to-latest must stay hidden when the browser clamps the estimated bottom"
+  );
+
+  const latest = document.createElement("div");
+  latest.className = "chat-line__message";
+  latest.dataset.id = "performance-latest";
+  latest.innerHTML = `
+    <span data-a-target="chat-message-username" data-a-user="performance">performance</span>
+    <span data-a-target="chat-line-message-body">latest message</span>
+  `;
+  scroller.append(latest);
+  await waitFor(
+    dom.window,
+    () => document.querySelector("[data-message-id='performance-latest']")
+  );
+
+  assert.equal(
+    jump.hidden,
+    true,
+    "new messages must not create an unread count while following the latest chat"
+  );
 });

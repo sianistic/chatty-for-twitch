@@ -6,6 +6,7 @@ const CACHE_TTL = 5 * 60 * 1000;
 const LIVE_ALARM = "chatty-live-channel-check";
 const LIVE_STATE_KEY = "chattyLiveStates";
 const cache = new Map();
+let liveCheckPromise = null;
 
 async function cachedJson(url) {
   const hit = cache.get(url);
@@ -71,6 +72,53 @@ async function channelIsLive(channel) {
   }
 }
 
+async function findChannelTab(channel) {
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://www.twitch.tv/*"] });
+    return tabs.find((tab) => {
+      try {
+        const pathParts = new URL(tab.url).pathname.split("/").filter(Boolean);
+        return pathParts.length === 1
+          && decodeURIComponent(pathParts[0]).toLowerCase() === channel;
+      } catch (_error) {
+        return false;
+      }
+    });
+  } catch (error) {
+    console.info(`[Chatty] Could not inspect existing tabs for ${channel}:`, error.message);
+    return null;
+  }
+}
+
+async function foregroundTab(tabId, windowId) {
+  if (windowId != null) {
+    try {
+      await chrome.windows.update(windowId, { focused: true });
+    } catch (error) {
+      console.info(`[Chatty] Could not focus Twitch window ${windowId}:`, error.message);
+    }
+  }
+  return chrome.tabs.update(tabId, { active: true });
+}
+
+async function openLiveChannel(channel) {
+  const existing = await findChannelTab(channel);
+  if (existing?.id != null) {
+    await foregroundTab(existing.id, existing.windowId);
+    await chrome.tabs.reload(existing.id);
+    return;
+  }
+
+  // Twitch defers parts of its player while a page is hidden. Create and focus
+  // the tab first so the Twitch navigation starts with a visible document.
+  const created = await chrome.tabs.create({ active: true });
+  if (created?.id == null) return;
+  await foregroundTab(created.id, created.windowId);
+  await chrome.tabs.update(created.id, {
+    url: `https://www.twitch.tv/${encodeURIComponent(channel)}`
+  });
+}
+
 async function checkLiveChannels() {
   const settings = await readSettings();
   if (!settings.autoOpenLive || settings.liveChannels.length === 0) return;
@@ -90,11 +138,20 @@ async function checkLiveChannels() {
 
   await chrome.storage.local.set({ [LIVE_STATE_KEY]: next });
   for (const channel of ChattyCore.newlyLiveChannels(previous, next)) {
-    await chrome.tabs.create({
-      url: `https://www.twitch.tv/${encodeURIComponent(channel)}`,
-      active: true
-    });
+    await openLiveChannel(channel);
   }
+}
+
+function scheduleLiveCheck() {
+  if (liveCheckPromise) return liveCheckPromise;
+  liveCheckPromise = checkLiveChannels()
+    .catch((error) => {
+      console.info("[Chatty] Live channel check failed:", error.message);
+    })
+    .finally(() => {
+      liveCheckPromise = null;
+    });
+  return liveCheckPromise;
 }
 
 async function configureLiveAlarm() {
@@ -104,11 +161,11 @@ async function configureLiveAlarm() {
   chrome.alarms.create(LIVE_ALARM, {
     periodInMinutes: settings.liveCheckMinutes
   });
-  checkLiveChannels();
+  return scheduleLiveCheck();
 }
 
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === LIVE_ALARM) checkLiveChannels();
+  if (alarm.name === LIVE_ALARM) scheduleLiveCheck();
 });
 
 chrome.runtime.onInstalled.addListener(configureLiveAlarm);

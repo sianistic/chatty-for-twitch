@@ -2,13 +2,30 @@
   "use strict";
 
   const core = globalThis.ChattyCore;
+  const VIRTUAL_OVERSCAN = 10;
+  const VIRTUAL_ROW_HEIGHT = 28;
+  const VIRTUAL_VIEWPORT_FALLBACK = 480;
+  const OUTGOING_ECHO_TTL = 15000;
   const state = {
     root: null,
     list: null,
+    virtualWindow: null,
+    virtualTop: null,
+    virtualBottom: null,
+    messages: [],
+    virtualStart: -1,
+    virtualEnd: -1,
+    virtualRowHeight: VIRTUAL_ROW_HEIGHT,
+    virtualRenderFrame: 0,
+    virtualDirty: false,
+    replyInteractionUntil: 0,
+    threadAnchor: null,
+    followLatest: true,
     settings: core.sanitizeSettings({}),
     emotes: new Map(),
     channel: "",
     seen: new Set(),
+    outgoingDrafts: [],
     processedNodes: new WeakSet(),
     messageSequence: 0,
     observer: null,
@@ -20,6 +37,12 @@
     autocompleteQuery: "",
     autocompleteIndex: 0,
     claimedPointButtons: new WeakSet(),
+    revealedFilterButtons: new WeakSet(),
+    unreadCount: 0,
+    isModerator: false,
+    pinnedSignature: "",
+    dismissedPinnedSignature: "",
+    predictionSignature: "",
     route: window.location.href,
     rescanTimer: 0,
     pointsScanTimer: 0
@@ -40,7 +63,41 @@
       "[data-a-target='chat-scroller']",
       ".chat-scrollable-area__message-container"
     ],
+    chatReady: [
+      ".stream-chat",
+      "[data-test-selector='chat-room-component-layout']",
+      "[data-a-target='chat-scroller']",
+      ".chat-scrollable-area__message-container"
+    ].join(","),
     nativeInput: "[data-a-target='chat-input'][contenteditable='true']",
+    composer: ".chat-input, [data-a-target='chat-input'][contenteditable='true']",
+    replyContext: [
+      "[data-a-target='chat-message-reply-context']",
+      "[data-test-selector='chat-message-reply-context']",
+      "[data-a-target='reply-context']",
+      "[data-test-selector='reply-context']",
+      "[data-a-target*='reply-context' i]",
+      "[data-test-selector*='reply-context' i]",
+      ".chat-line__message--reply"
+    ].join(","),
+    pinned: ".pinned-chat__highlight-card",
+    prediction: [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      "[data-test-selector^='community-prediction-highlight-']",
+      "[data-test-selector*='community-prediction' i]",
+      "[data-a-target*='community-prediction' i]",
+      ".community-prediction-highlight"
+    ].join(","),
+    predictionMutation: [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      "[data-test-selector^='community-prediction-highlight-']",
+      "[data-a-target^='community-prediction-highlight-']",
+      ".community-prediction-highlight"
+    ].join(","),
     pointsClaim: [
       "button[aria-label*='Claim Bonus' i]",
       "button[data-test-selector='community-points-claim-button']",
@@ -55,6 +112,64 @@
       if (node) return node;
     }
     return null;
+  }
+
+  function uniqueSelectorMatches(selectors, scope = document) {
+    const seen = new Set();
+    const matches = [];
+    for (const selector of selectors) {
+      for (const node of scope.querySelectorAll(selector)) {
+        if (seen.has(node)) continue;
+        seen.add(node);
+        matches.push(node);
+      }
+    }
+    return matches;
+  }
+
+  function elementLayoutScore(node) {
+    if (
+      !node?.isConnected ||
+      node.closest?.("[hidden], [aria-hidden='true'], [inert]")
+    ) {
+      return -1;
+    }
+    const style = window.getComputedStyle?.(node);
+    if (style?.display === "none" || style?.visibility === "hidden") return -1;
+    const rect = node.getBoundingClientRect?.();
+    return rect && rect.width > 0 && rect.height > 0 ? 1 : 0;
+  }
+
+  function compareLayoutRank(left, right) {
+    return (
+      Number(right.layout >= 0) - Number(left.layout >= 0) ||
+      Number(right.layout > 0) - Number(left.layout > 0)
+    );
+  }
+
+  function findChatShell(requireContainer = false) {
+    const candidates = uniqueSelectorMatches(SELECTORS.chatShell);
+    const scored = candidates.map((shell, index) => {
+      const container = findNativeContainer(shell);
+      const messages = shell.querySelectorAll(SELECTORS.message).length;
+      const composer = shell.querySelector(".chat-input");
+      return {
+        shell,
+        container,
+        messages,
+        composer,
+        layout: elementLayoutScore(shell),
+        index,
+      };
+    }).filter((candidate) => !requireContainer || candidate.container);
+    scored.sort((left, right) =>
+      compareLayoutRank(left, right) ||
+      Number(Boolean(right.container)) - Number(Boolean(left.container)) ||
+      right.messages - left.messages ||
+      Number(Boolean(right.composer)) - Number(Boolean(left.composer)) ||
+      left.index - right.index
+    );
+    return scored[0]?.shell || null;
   }
 
   function channelFromLocation() {
@@ -105,7 +220,40 @@
         </div>
         <div class="chatty-actions"></div>
       </header>
-      <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <aside class="chatty-pinned" aria-label="Pinned message" hidden>
+        <div class="chatty-pinned-header">
+          <strong>PINNED</strong>
+          <span class="chatty-pinned-meta"></span>
+          <div class="chatty-pinned-actions">
+            <button type="button" class="chatty-pinned-open">View</button>
+            <button type="button" class="chatty-pinned-hide">Hide</button>
+          </div>
+        </div>
+        <div class="chatty-pinned-content"></div>
+      </aside>
+      <aside class="chatty-prediction" aria-label="Active Twitch Prediction" aria-live="polite" hidden>
+        <div class="chatty-prediction-header">
+          <strong>PREDICTION</strong>
+          <span class="chatty-prediction-status"></span>
+          <button type="button" class="chatty-prediction-open">Open in Twitch</button>
+        </div>
+        <div class="chatty-prediction-title"></div>
+        <div class="chatty-prediction-outcomes"></div>
+      </aside>
+      <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions">
+        <div class="chatty-virtual-spacer chatty-virtual-top" aria-hidden="true"></div>
+        <div class="chatty-virtual-window"></div>
+        <div class="chatty-virtual-spacer chatty-virtual-bottom" aria-hidden="true"></div>
+      </div>
+      <section class="chatty-thread" aria-label="Message thread" hidden>
+        <header class="chatty-thread-header">
+          <button type="button" class="chatty-thread-close" aria-label="Close thread">&#8592;</button>
+          <strong>Thread</strong>
+          <span class="chatty-thread-count"></span>
+        </header>
+        <div class="chatty-thread-list"></div>
+      </section>
+      <button type="button" class="chatty-jump" hidden>Jump to latest</button>
       <div class="chatty-autocomplete" role="listbox" aria-label="7TV emotes" hidden></div>
       <div class="chatty-emote-card" role="tooltip" hidden>
         <img class="chatty-emote-preview" alt="">
@@ -164,6 +312,15 @@
     host.append(panel);
     state.root = panel;
     state.list = panel.querySelector(".chatty-list");
+    state.virtualWindow = panel.querySelector(".chatty-virtual-window");
+    state.virtualTop = panel.querySelector(".chatty-virtual-top");
+    state.virtualBottom = panel.querySelector(".chatty-virtual-bottom");
+    state.list.addEventListener("scroll", handleVirtualScroll, { passive: true });
+    panel.querySelector(".chatty-jump").addEventListener("click", jumpToLatest);
+    panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
+    panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
+    panel.querySelector(".chatty-prediction-open").addEventListener("click", openNativePrediction);
+    panel.querySelector(".chatty-thread-close").addEventListener("click", closeThread);
     panel.querySelector(".chatty-save").addEventListener("click", savePanelSettings);
     for (const tab of panel.querySelectorAll("[data-settings-tab]")) {
       tab.addEventListener("click", switchSettingsTab);
@@ -174,6 +331,8 @@
     panel.addEventListener("focusout", hideEmoteCard);
     applySettings();
     syncNativeComposer(host);
+    syncPinnedMessage();
+    syncPrediction();
     scanChannelPoints();
   }
 
@@ -188,9 +347,21 @@
   }
 
   function syncNativeComposer(host) {
-    const composer =
-      host.querySelector(".chat-input") ||
-      document.querySelector(".chat-input");
+    const composer = uniqueSelectorMatches([".chat-input"], host)
+      .map((node, index) => ({
+        node,
+        index,
+        input: Boolean(node.querySelector(SELECTORS.nativeInput)),
+        send: Boolean(node.querySelector("[data-a-target='chat-send-button']")),
+        layout: elementLayoutScore(node)
+      }))
+      .sort((left, right) =>
+        compareLayoutRank(left, right) ||
+        Number(right.input) - Number(left.input) ||
+        Number(right.send) - Number(left.send) ||
+        left.index - right.index
+      )[0]
+      ?.node || null;
     if (!composer) {
       setStatus("Waiting for Twitch composer\u2026");
       return;
@@ -212,6 +383,14 @@
       signal: state.nativeComposerAbort.signal
     });
     input?.addEventListener("keydown", handleAutocompleteKeys, {
+      capture: true,
+      signal: state.nativeComposerAbort.signal
+    });
+    composer.addEventListener("keydown", captureOutgoingEnter, {
+      capture: true,
+      signal: state.nativeComposerAbort.signal
+    });
+    composer.addEventListener("click", captureOutgoingClick, {
       capture: true,
       signal: state.nativeComposerAbort.signal
     });
@@ -382,12 +561,45 @@
     state.autocompleteIndex = 0;
   }
 
+  function largestImageCandidate(srcset) {
+    return String(srcset || "")
+      .split(",")
+      .map((candidate) => {
+        const [url, descriptor = "1x"] = candidate.trim().split(/\s+/);
+        return {
+          url,
+          score: Number.parseFloat(descriptor) || 1
+        };
+      })
+      .filter((candidate) => candidate.url)
+      .sort((left, right) => right.score - left.score)[0]?.url || "";
+  }
+
+  function highResolutionBadgeUrl(image) {
+    const source =
+      largestImageCandidate(image.srcset) ||
+      image.currentSrc ||
+      image.src;
+    try {
+      const url = new URL(source, window.location.href);
+      if (
+        /(^|\.)jtvnw\.net$/i.test(url.hostname) &&
+        url.pathname.startsWith("/badges/v1/")
+      ) {
+        url.pathname = url.pathname.replace(/\/(?:1|2|3)$/, "/3");
+      }
+      return url.href;
+    } catch {
+      return source;
+    }
+  }
+
   function showEmoteCard(event) {
     const emote = event.target.closest?.(".chatty-emote, .chatty-badge");
     if (!emote || !state.root?.contains(emote)) return;
     const card = state.root.querySelector(".chatty-emote-card");
     const preview = card.querySelector(".chatty-emote-preview");
-    preview.src = emote.src;
+    preview.src = emote.dataset.previewSrc || emote.src;
     preview.alt = emote.alt;
     card.querySelector(".chatty-emote-name").textContent =
       emote.dataset.emoteName || emote.alt || "Emote";
@@ -444,8 +656,11 @@
   }
 
   function schedulePointsScan() {
-    clearTimeout(state.pointsScanTimer);
-    state.pointsScanTimer = setTimeout(scanChannelPoints, 100);
+    if (state.pointsScanTimer) return;
+    state.pointsScanTimer = setTimeout(() => {
+      state.pointsScanTimer = 0;
+      scanChannelPoints();
+    }, 250);
   }
 
   function populateSettingsForm() {
@@ -476,74 +691,512 @@
     state.root.style.setProperty("--chatty-font-size", `${state.settings.fontSize}px`);
     state.root.classList.toggle("chatty-roomy", !state.settings.compact);
     state.root.classList.toggle("chatty-no-time", !state.settings.timestamps);
+    state.virtualRowHeight = state.settings.compact ? VIRTUAL_ROW_HEIGHT : 34;
+    state.virtualDirty = true;
+    trimMessageHistory();
+    scheduleVirtualRender();
   }
 
   function setStatus(text) {
     const node = state.root?.querySelector(".chatty-status");
-    if (node) node.textContent = text;
+    if (node && node.textContent !== text) node.textContent = text;
+  }
+
+  function virtualViewportHeight() {
+    return state.list?.clientHeight || VIRTUAL_VIEWPORT_FALLBACK;
+  }
+
+  function virtualScrollHeight() {
+    return state.messages.length * state.virtualRowHeight;
+  }
+
+  function effectiveScrollHeight() {
+    if (!state.list) return virtualScrollHeight();
+    const viewport = virtualViewportHeight();
+    return state.list.scrollHeight > viewport
+      ? state.list.scrollHeight
+      : virtualScrollHeight();
+  }
+
+  function isNearBottom() {
+    if (!state.list) return true;
+    return (
+      effectiveScrollHeight() -
+      state.list.scrollTop -
+      virtualViewportHeight() <
+      80
+    );
+  }
+
+  function handleVirtualScroll() {
+    state.followLatest = isNearBottom();
+    scheduleVirtualRender();
+    updateJumpButton();
+  }
+
+  function updateJumpButton() {
+    const button = state.root?.querySelector(".chatty-jump");
+    if (!button) return;
+    const nearBottom = state.followLatest || isNearBottom();
+    if (nearBottom) {
+      state.followLatest = true;
+      state.unreadCount = 0;
+    }
+    button.hidden = nearBottom;
+    button.textContent = state.unreadCount
+      ? `${state.unreadCount} new - Jump to latest`
+      : "Jump to latest";
+  }
+
+  function jumpToLatest() {
+    if (!state.list) return;
+    state.followLatest = true;
+    renderVirtualWindow();
+    state.list.scrollTop = effectiveScrollHeight();
+    state.unreadCount = 0;
+    updateJumpButton();
+  }
+
+  function safeHttpUrl(value) {
+    try {
+      const url = new URL(value, window.location.href);
+      return url.protocol === "http:" || url.protocol === "https:" ? url.href : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function collectFragments(container) {
+    const fragments = [];
+    function visit(parent) {
+      for (const child of parent.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE) {
+          if (child.nodeValue) fragments.push({ type: "text", value: child.nodeValue });
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        if (child.matches("[data-a-target='chat-badge'], [data-a-target='chat-message-username']")) {
+          continue;
+        }
+        if (child instanceof HTMLImageElement) {
+          fragments.push({
+            type: "image",
+            src: child.currentSrc || child.src,
+            alt: child.alt || child.title || "emote"
+          });
+          continue;
+        }
+        if (child instanceof HTMLAnchorElement) {
+          const href = safeHttpUrl(child.href);
+          if (href) {
+            fragments.push({ type: "link", href, value: child.textContent || href });
+            continue;
+          }
+        }
+        visit(child);
+      }
+    }
+    visit(container);
+    return fragments;
+  }
+
+  function appendFragments(container, fragments) {
+    for (const fragment of fragments) {
+      if (fragment.type === "link") {
+        const link = document.createElement("a");
+        link.className = "chatty-link";
+        link.href = fragment.href;
+        link.target = "_blank";
+        link.rel = "noopener noreferrer";
+        link.textContent = fragment.value || fragment.href;
+        container.append(link);
+        continue;
+      }
+      if (fragment.type === "image") {
+        const image = document.createElement("img");
+        image.className = "chatty-emote";
+        image.src = fragment.src;
+        image.alt = fragment.alt;
+        image.title = fragment.alt;
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.fetchPriority = "low";
+        decorateEmote(image, {
+          name: fragment.alt,
+          provider: "Twitch",
+          id: twitchEmoteId(fragment.src)
+        });
+        container.append(image);
+        continue;
+      }
+      for (const token of core.tokenizeEmotes(fragment.value, state.emotes)) {
+        if (token.type === "text") {
+          container.append(document.createTextNode(token.value));
+          continue;
+        }
+        const image = document.createElement("img");
+        image.className = "chatty-emote";
+        image.src = token.emote.url;
+        image.alt = token.value;
+        image.title = token.value;
+        image.loading = "lazy";
+        image.decoding = "async";
+        image.fetchPriority = "low";
+        decorateEmote(image, token.emote);
+        container.append(image);
+      }
+    }
+  }
+
+  function readPinnedMessage(node) {
+    if (!node) return null;
+    const messageNode = node.querySelector(".pinned-chat__message");
+    if (!messageNode) return null;
+    const meta = node.querySelector(".pinned-chat__pinned-by")?.textContent?.trim() || "Pinned message";
+    const fragments = collectFragments(messageNode);
+    const text = fragments.map((fragment) => fragment.value || fragment.alt || "").join("").trim();
+    const signature = `${meta}|${text}|${fragments.map((fragment) => fragment.href || "").join("|")}`;
+    return { meta, fragments, signature, nativeNode: node };
+  }
+
+  function syncPinnedMessage() {
+    if (!state.root) return;
+    const nativePinned = Array.from(document.querySelectorAll(SELECTORS.pinned))
+      .find((node) => !state.root.contains(node));
+    const pinned = readPinnedMessage(nativePinned);
+    const panel = state.root.querySelector(".chatty-pinned");
+    if (!pinned || pinned.signature === state.dismissedPinnedSignature) {
+      panel.hidden = true;
+      if (!pinned) state.pinnedSignature = "";
+      return;
+    }
+    if (pinned.signature === state.pinnedSignature && !panel.hidden) return;
+    state.pinnedSignature = pinned.signature;
+    panel.dataset.signature = pinned.signature;
+    panel.querySelector(".chatty-pinned-meta").textContent = pinned.meta;
+    const content = panel.querySelector(".chatty-pinned-content");
+    content.replaceChildren();
+    appendFragments(content, pinned.fragments);
+    panel.hidden = false;
+  }
+
+  function mutationsTouchSelector(records, selector) {
+    const nodeTouchesSelector = (node) =>
+      node?.nodeType === Node.ELEMENT_NODE &&
+      (
+        node.matches?.(selector) ||
+        node.querySelector?.(selector)
+      );
+    return records.some((record) => {
+      if (record.target?.closest?.(selector)) return true;
+      return [...record.addedNodes, ...record.removedNodes].some(nodeTouchesSelector);
+    });
+  }
+
+  function pageFeatureMutationRecords(records) {
+    const host = state.root?.parentElement;
+    if (!host) return [];
+    return records.filter((record) => {
+      const target = record.target;
+      if (!target || (target !== host && !host.contains(target))) return false;
+      if (state.root?.contains(target)) return false;
+      if (state.nativeContainer?.contains(target)) return false;
+      return true;
+    });
+  }
+
+  function openNativePinned() {
+    const nativePinned = Array.from(document.querySelectorAll(SELECTORS.pinned))
+      .find((node) => !state.root?.contains(node));
+    const button = Array.from(nativePinned?.querySelectorAll("button") || [])
+      .find((candidate) => /expand|view/i.test(
+        `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`
+      ));
+    button?.click();
+  }
+
+  function hidePinnedMessage() {
+    const panel = state.root?.querySelector(".chatty-pinned");
+    if (!panel) return;
+    state.dismissedPinnedSignature = panel.dataset.signature || state.pinnedSignature;
+    panel.hidden = true;
+  }
+
+  function firstText(node, selectors) {
+    for (const selector of selectors) {
+      const value = node.querySelector(selector)?.textContent?.replace(/\s+/g, " ").trim();
+      if (value) return value;
+    }
+    return "";
+  }
+
+  function findNativePrediction() {
+    const rootSelector = [
+      "[data-test-selector='community-prediction-highlight']",
+      "[data-a-target='community-prediction-highlight']",
+      "[data-test-selector='prediction-highlight']",
+      ".community-prediction-highlight",
+      ".community-highlight-stack__card",
+      ".community-highlight-stack__card--wide",
+      ".community-highlight"
+    ].join(",");
+    const scope = state.root?.parentElement || document;
+    for (const marker of scope.querySelectorAll(SELECTORS.prediction)) {
+      if (state.root?.contains(marker)) continue;
+      const root = marker.closest(rootSelector) || marker;
+      if (!state.root?.contains(root)) return root;
+    }
+    return null;
+  }
+
+  function readPrediction(node) {
+    if (!node) return null;
+    const title = firstText(node, [
+      "[data-test-selector='prediction-title']",
+      "[data-a-target='prediction-title']",
+      "[data-test-selector='community-prediction-highlight-header__title']",
+      "[data-test-selector*='prediction-title']",
+      "h3",
+      "h4"
+    ]);
+    if (!title) return null;
+
+    let outcomeNodes = Array.from(node.querySelectorAll(
+      [
+        "[data-test-selector='prediction-outcome']",
+        "[data-a-target='prediction-outcome']",
+        "[data-test-selector='community-prediction-highlight-body__outcome']"
+      ].join(",")
+    ));
+    if (!outcomeNodes.length) {
+      outcomeNodes = Array.from(node.querySelectorAll("button")).filter((button) =>
+        !/view|details|predict now|manage/i.test(
+          `${button.getAttribute("aria-label") || ""} ${button.textContent || ""}`
+        )
+      );
+    }
+    const outcomes = outcomeNodes.slice(0, 4).map((outcome) => {
+      const label = firstText(outcome, [
+        "[data-test-selector='prediction-outcome-title']",
+        "[data-a-target='prediction-outcome-title']",
+        "[data-test-selector='community-prediction-highlight-body__outcome-title']",
+        "strong"
+      ]) || outcome.textContent?.replace(/\s+/g, " ").trim() || "Outcome";
+      const detail = firstText(outcome, [
+        "[data-test-selector='prediction-outcome-points']",
+        "[data-test-selector='prediction-outcome-percentage']",
+        "[data-a-target='prediction-outcome-points']",
+        "[data-test-selector='community-prediction-highlight-body__outcome-points']",
+        "small"
+      ]);
+      return { label, detail };
+    });
+    const status = firstText(node, [
+      "[data-test-selector='prediction-status']",
+      "[data-a-target='prediction-status']",
+      "[data-test-selector*='prediction-timer']",
+      "time"
+    ]);
+    const signature = `${title}|${status}|${outcomes
+      .map((outcome) => `${outcome.label}:${outcome.detail}`)
+      .join("|")}`;
+    return { title, outcomes, status, signature };
+  }
+
+  function syncPrediction() {
+    if (!state.root) return;
+    const panel = state.root.querySelector(".chatty-prediction");
+    const prediction = readPrediction(findNativePrediction());
+    if (!prediction) {
+      panel.hidden = true;
+      state.predictionSignature = "";
+      return;
+    }
+    if (prediction.signature === state.predictionSignature && !panel.hidden) return;
+    state.predictionSignature = prediction.signature;
+    panel.querySelector(".chatty-prediction-title").textContent = prediction.title;
+    panel.querySelector(".chatty-prediction-status").textContent = prediction.status || "Live";
+    const outcomes = panel.querySelector(".chatty-prediction-outcomes");
+    outcomes.replaceChildren();
+    for (const outcome of prediction.outcomes) {
+      const item = document.createElement("div");
+      item.className = "chatty-prediction-outcome";
+      const label = document.createElement("strong");
+      label.textContent = outcome.label;
+      const detail = document.createElement("span");
+      detail.textContent = outcome.detail;
+      item.append(label, detail);
+      outcomes.append(item);
+    }
+    panel.hidden = false;
+  }
+
+  function openNativePrediction() {
+    const native = findNativePrediction();
+    if (!native) {
+      setStatus("No active Twitch Prediction");
+      return;
+    }
+    const explicit = native.querySelector([
+      "[data-test-selector='prediction-details']",
+      "[data-test-selector='community-prediction-highlight-header__action']",
+      "[data-a-target='community-prediction-highlight-action']"
+    ].join(","));
+    const candidates = Array.from(native.querySelectorAll("button")).filter((button) => {
+      if (button.disabled || button.getAttribute("aria-disabled") === "true") return false;
+      if (button.closest("[data-test-selector*='outcome' i], [data-a-target*='outcome' i]")) {
+        return false;
+      }
+      return !/how-to-play|terms-and-conditions|send-feedback|dismiss-message/i.test(
+        `${button.dataset.testSelector || ""} ${button.dataset.aTarget || ""}`
+      );
+    });
+    const trigger = explicit && !explicit.disabled
+      ? explicit
+      : candidates.length === 1
+        ? candidates[0]
+        : native.matches("button") && !native.disabled
+          ? native
+          : null;
+    if (trigger) {
+      trigger.click();
+      setStatus("Opened Twitch Prediction");
+      return;
+    }
+
+    const points = document.querySelector(
+      "[data-test-selector='community-points-summary'] button, " +
+      "[data-a-target='community-points-summary'] button"
+    );
+    if (points) {
+      points.click();
+      setStatus("Opened Channel Points — choose Predictions");
+      return;
+    }
+    setStatus("Prediction controls unavailable");
   }
 
   function findNativeContainer(shell) {
-    for (const selector of SELECTORS.scroll) {
-      const node = shell.querySelector(selector);
-      if (node) return node;
-    }
+    const container = uniqueSelectorMatches(SELECTORS.scroll, shell)
+      .map((node, index) => ({
+        node,
+        index,
+        messages: node.querySelectorAll(SELECTORS.message).length,
+        layout: elementLayoutScore(node)
+      }))
+      .sort((left, right) =>
+        compareLayoutRank(left, right) ||
+        right.messages - left.messages ||
+        left.index - right.index
+      )[0]
+      ?.node;
+    if (container) return container;
     const message = shell.querySelector(SELECTORS.message);
     return message?.parentElement || null;
   }
 
+  function replyIdentity(username, text) {
+    const user = String(username || "").replace(/^@/, "").trim().toLowerCase();
+    const body = String(text || "").replace(/\s+/g, " ").trim().toLowerCase();
+    return `${user}|${body}`;
+  }
+
+  function findReplyContextNode(node) {
+    const structured = Array.from(node.querySelectorAll(SELECTORS.replyContext))
+      .find((candidate) => candidate !== node);
+    if (structured) return structured;
+    if (!/^Replying to\b/i.test(node.getAttribute("aria-label") || "")) return null;
+    return Array.from(node.querySelectorAll("p")).find((candidate) =>
+      /^Replying to\b/i.test(candidate.textContent?.replace(/\s+/g, " ").trim() || "")
+    ) || null;
+  }
+
+  function firstOutsideContext(node, selector, context) {
+    return Array.from(node.querySelectorAll(selector)).find((candidate) =>
+      !context?.contains(candidate)
+    ) || null;
+  }
+
+  function currentUsernameNode(node, context = findReplyContextNode(node)) {
+    return firstOutsideContext(node, "[data-a-target='chat-message-username']", context) ||
+      firstOutsideContext(node, "[data-a-user]", context) ||
+      firstOutsideContext(node, ".chat-author__display-name", context);
+  }
+
+  function currentMessageBody(node, context = findReplyContextNode(node)) {
+    return firstOutsideContext(node, "[data-a-target='chat-line-message-body']", context) ||
+      firstOutsideContext(node, ".text-fragment", context)?.parentElement ||
+      node;
+  }
+
+  function readReplyContext(node) {
+    const context = findReplyContextNode(node);
+    if (!context) return null;
+
+    const parentUserNode = context.querySelector([
+      "[data-a-target*='reply-context-username' i]",
+      "[data-test-selector*='reply-context-username' i]",
+      "[data-a-target*='reply-parent-user' i]",
+      "[data-test-selector*='reply-parent-user' i]",
+      "[data-a-user]"
+    ].join(","));
+    const parentBodyNode = context.querySelector([
+      "[data-a-target*='reply-context-body' i]",
+      "[data-test-selector*='reply-context-body' i]",
+      "[data-a-target*='reply-message-body' i]",
+      "[data-test-selector*='reply-message-body' i]",
+      "[data-a-target*='reply-text' i]",
+      "[data-test-selector*='reply-text' i]"
+    ].join(","));
+    let parentUsername =
+      context.getAttribute("data-reply-parent-user-login") ||
+      context.getAttribute("data-reply-parent-display-name") ||
+      parentUserNode?.getAttribute("data-a-user") ||
+      parentUserNode?.textContent ||
+      "";
+    let parentText = parentBodyNode
+      ? collectFragments(parentBodyNode)
+        .map((fragment) => fragment.value || fragment.alt || "")
+        .join("")
+      : "";
+
+    const raw = context.textContent?.replace(/\s+/g, " ").trim() || "";
+    const parsed = raw.match(/^Replying to\s+@?([^:]+):\s*(.*)$/i);
+    if (!parentUsername && parsed) parentUsername = parsed[1];
+    if (!parentText && parsed) parentText = parsed[2];
+    if (!parentUsername) {
+      parentUsername = (node.getAttribute("aria-label") || "")
+        .match(/^Replying to\s+([^,]+)/i)?.[1] || "";
+    }
+
+    parentUsername = parentUsername.replace(/^@/, "").trim();
+    parentText = parentText.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!parentUsername && !parentText) return null;
+    const parentMessageId =
+      context.getAttribute("data-reply-parent-msg-id") ||
+      context.getAttribute("data-reply-parent-message-id") ||
+      context.getAttribute("data-parent-message-id") ||
+      "";
+    return {
+      parentMessageId,
+      parentUsername,
+      parentText,
+      signature: replyIdentity(parentUsername, parentText)
+    };
+  }
+
   function readMessage(node) {
-    const usernameNode =
-      node.querySelector("[data-a-user]") ||
-      node.querySelector("[data-a-target='chat-message-username']") ||
-      node.querySelector(".chat-author__display-name");
+    const reply = readReplyContext(node);
+    const replyContext = findReplyContextNode(node);
+    const usernameNode = currentUsernameNode(node, replyContext);
     const username =
       usernameNode?.getAttribute("data-a-user") ||
       usernameNode?.textContent?.trim() ||
       "";
-    const body =
-      node.querySelector("[data-a-target='chat-line-message-body']") ||
-      node.querySelector(".text-fragment")?.parentElement ||
-      node;
-    const fragments = [];
-    const walker = document.createTreeWalker(
-      body,
-      NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
-      {
-        acceptNode(candidate) {
-          if (
-            candidate.nodeType === Node.ELEMENT_NODE &&
-            candidate !== body &&
-            candidate.matches?.(
-              "[data-a-target='chat-badge'], [data-a-target='chat-message-username']"
-            )
-          ) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          if (
-            candidate.nodeType === Node.TEXT_NODE &&
-            !candidate.nodeValue
-          ) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      }
-    );
-    let current;
-    while ((current = walker.nextNode())) {
-      if (current.nodeType === Node.TEXT_NODE) {
-        fragments.push({ type: "text", value: current.nodeValue });
-      } else if (current instanceof HTMLImageElement) {
-        fragments.push({
-          type: "image",
-          src: current.currentSrc || current.src,
-          alt: current.alt || current.title || "emote"
-        });
-      }
-    }
+    const body = currentMessageBody(node, replyContext);
+    const fragments = collectFragments(body);
     const text = fragments
-      .map((fragment) => fragment.type === "text" ? fragment.value : fragment.alt)
+      .map((fragment) => fragment.value || fragment.alt || "")
       .join("")
       .trim();
     if (!username && !text) return null;
@@ -558,7 +1211,11 @@
       "#adadb8";
     const badges = Array.from(
       node.querySelectorAll("img.chat-badge, [data-a-target='chat-badge'] img, img[alt$='Badge']")
-    ).map((image) => ({ src: image.currentSrc || image.src, alt: image.alt || "badge" }));
+    ).filter((image) => !replyContext?.contains(image)).map((image) => ({
+      src: image.currentSrc || image.src,
+      previewSrc: highResolutionBadgeUrl(image),
+      alt: image.alt || "badge"
+    }));
     const reward = Boolean(
       node.querySelector("[data-test-selector*='reward'], [data-a-target*='reward']") ||
       node.closest("[data-test-selector*='reward']")
@@ -571,19 +1228,121 @@
       badges,
       fragments,
       reward,
-      usernameNode
+      reply,
+      usernameNode,
+      nativeNode: node
     };
   }
 
-  function appendMessage(message) {
-    if (!message || state.seen.has(message.id)) return;
-    state.seen.add(message.id);
-    if (state.seen.size > state.settings.maxMessages * 2) {
-      state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
+  function messageIdentity(message) {
+    return replyIdentity(message?.username, message?.text);
+  }
+
+  function findReplyParentIndex(reply, beforeIndex) {
+    if (!reply) return -1;
+    for (let index = Math.min(beforeIndex - 1, state.messages.length - 1); index >= 0; index -= 1) {
+      const candidate = state.messages[index];
+      if (reply.parentMessageId && candidate.id === reply.parentMessageId) return index;
+      if (messageIdentity(candidate) === reply.signature) return index;
+    }
+    return -1;
+  }
+
+  function loadedThreadMessages(anchor) {
+    let currentIndex = state.messages.indexOf(anchor);
+    if (currentIndex < 0) {
+      currentIndex = state.messages.findIndex((message) => message.id === anchor?.id);
+    }
+    let current = currentIndex >= 0 ? state.messages[currentIndex] : anchor;
+    let rootSignature = messageIdentity(current);
+    let syntheticRoot = null;
+    const visited = new Set();
+
+    while (current?.reply && !visited.has(rootSignature)) {
+      visited.add(rootSignature);
+      const parentIndex = findReplyParentIndex(current.reply, currentIndex);
+      if (parentIndex < 0) {
+        rootSignature = current.reply.signature;
+        syntheticRoot = {
+          id: `thread-parent-${rootSignature}`,
+          username: current.reply.parentUsername,
+          text: current.reply.parentText,
+          timestamp: current.timestamp,
+          fragments: [{ type: "text", value: current.reply.parentText }],
+          synthetic: true
+        };
+        break;
+      }
+      currentIndex = parentIndex;
+      current = state.messages[currentIndex];
+      rootSignature = messageIdentity(current);
     }
 
-    const wasNearBottom =
-      state.list.scrollHeight - state.list.scrollTop - state.list.clientHeight < 80;
+    const known = new Set([rootSignature]);
+    const loaded = [];
+    for (const message of state.messages) {
+      const identity = messageIdentity(message);
+      if (known.has(identity) || (message.reply && known.has(message.reply.signature))) {
+        loaded.push(message);
+        known.add(identity);
+      }
+    }
+    if (syntheticRoot && !loaded.some((message) => messageIdentity(message) === rootSignature)) {
+      loaded.unshift(syntheticRoot);
+    }
+    if (anchor && !loaded.some((message) => message.id === anchor.id)) loaded.push(anchor);
+    return loaded;
+  }
+
+  function createThreadMessage(message) {
+    const entry = document.createElement("article");
+    entry.className = "chatty-thread-message";
+    const meta = document.createElement("div");
+    meta.className = "chatty-thread-meta";
+    const user = document.createElement("strong");
+    user.className = "chatty-thread-user";
+    user.textContent = `@${message.username || "unknown"}`;
+    const time = document.createElement("time");
+    time.textContent = new Date(message.timestamp || Date.now()).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    meta.append(user, time);
+    const body = document.createElement("div");
+    body.className = "chatty-thread-text";
+    appendFragments(body, message.fragments || [{ type: "text", value: message.text || "" }]);
+    entry.append(meta, body);
+    return entry;
+  }
+
+  function renderThread(anchor = state.threadAnchor) {
+    if (!state.root || !anchor) return;
+    const panel = state.root.querySelector(".chatty-thread");
+    const list = panel.querySelector(".chatty-thread-list");
+    const messages = loadedThreadMessages(anchor);
+    list.replaceChildren(...messages.map(createThreadMessage));
+    const replyCount = Math.max(0, messages.length - 1);
+    panel.querySelector(".chatty-thread-count").textContent =
+      `${replyCount} ${replyCount === 1 ? "reply" : "replies"} loaded`;
+  }
+
+  function openThread(message) {
+    state.threadAnchor = message;
+    renderThread(message);
+    state.root.querySelector(".chatty-thread").hidden = false;
+  }
+
+  function closeThread() {
+    state.threadAnchor = null;
+    const panel = state.root?.querySelector(".chatty-thread");
+    if (panel) panel.hidden = true;
+  }
+
+  function holdReplyInteraction() {
+    state.replyInteractionUntil = Math.max(state.replyInteractionUntil, Date.now() + 650);
+  }
+
+  function createMessageRow(message) {
     const row = document.createElement("div");
     row.className = "chatty-message";
     row.dataset.messageId = message.id;
@@ -596,8 +1355,33 @@
 
     const time = document.createElement("time");
     time.className = "chatty-time";
-    time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    time.textContent = new Date(message.timestamp).toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
     row.append(time);
+
+    if (message.reply) {
+      const context = document.createElement("button");
+      context.type = "button";
+      context.className = "chatty-reply-context";
+      context.title = `View thread \u2014 replying to ${message.reply.parentUsername}: ${message.reply.parentText}`;
+      context.setAttribute(
+        "aria-label",
+        `Open thread. Replying to ${message.reply.parentUsername}: ${message.reply.parentText}`
+      );
+      const arrow = document.createElement("span");
+      arrow.className = "chatty-reply-context-arrow";
+      arrow.textContent = "\u21b3";
+      const user = document.createElement("strong");
+      user.textContent = `@${message.reply.parentUsername}`;
+      const snippet = document.createElement("span");
+      snippet.className = "chatty-reply-context-text";
+      snippet.textContent = message.reply.parentText || "Parent message";
+      context.append(arrow, user, snippet);
+      context.addEventListener("click", () => openThread(message));
+      row.append(context);
+    }
 
     const badges = document.createElement("span");
     badges.className = "chatty-badges";
@@ -607,9 +1391,13 @@
       image.src = badge.src;
       image.alt = badge.alt;
       image.title = badge.alt;
+      image.loading = "lazy";
+      image.decoding = "async";
+      image.fetchPriority = "low";
       image.tabIndex = 0;
       image.dataset.emoteName = badge.alt || "Twitch badge";
       image.dataset.provider = "Twitch badge";
+      image.dataset.previewSrc = badge.previewSrc || badge.src;
       image.setAttribute("aria-label", `${badge.alt || "Twitch"} badge`);
       badges.append(image);
     }
@@ -626,44 +1414,297 @@
 
     const content = document.createElement("span");
     content.className = "chatty-content";
-    for (const fragment of message.fragments || [{ type: "text", value: message.text }]) {
-      if (fragment.type === "image") {
-        const image = document.createElement("img");
-        image.className = "chatty-emote";
-        image.src = fragment.src;
-        image.alt = fragment.alt;
-        image.title = fragment.alt;
-        image.loading = "lazy";
-        decorateEmote(image, {
-          name: fragment.alt,
-          provider: "Twitch",
-          id: twitchEmoteId(fragment.src)
-        });
-        content.append(image);
-        continue;
-      }
-      for (const token of core.tokenizeEmotes(fragment.value, state.emotes)) {
-        if (token.type === "text") {
-          content.append(document.createTextNode(token.value));
-          continue;
-        }
-        const image = document.createElement("img");
-        image.className = "chatty-emote";
-        image.src = token.emote.url;
-        image.alt = token.value;
-        image.title = token.value;
-        image.loading = "lazy";
-        decorateEmote(image, token.emote);
-        content.append(image);
-      }
-    }
+    appendFragments(content, message.fragments || [{ type: "text", value: message.text }]);
     row.append(content);
-    state.list.append(row);
 
-    while (state.list.childElementCount > state.settings.maxMessages) {
-      state.list.firstElementChild?.remove();
+    const reply = document.createElement("button");
+    reply.type = "button";
+    reply.className = "chatty-reply";
+    reply.textContent = "↩";
+    reply.title = `Reply to ${message.username}`;
+    reply.setAttribute("aria-label", `Reply to ${message.username}`);
+    for (const eventName of ["pointerenter", "pointermove", "pointerdown", "focus"]) {
+      reply.addEventListener(eventName, holdReplyInteraction);
     }
-    if (wasNearBottom) state.list.scrollTop = state.list.scrollHeight;
+    reply.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openNativeReply(message);
+    });
+    row.append(reply);
+
+    if (
+      state.isModerator &&
+      message.username &&
+      message.username.toLowerCase() !== findViewerName().toLowerCase()
+    ) {
+      row.append(buildModeratorActions(message));
+    }
+    return row;
+  }
+
+  function trimMessageHistory() {
+    const excess = state.messages.length - state.settings.maxMessages;
+    if (excess <= 0) return;
+    state.messages.splice(0, excess);
+    if (!state.followLatest && state.list) {
+      state.list.scrollTop = Math.max(
+        0,
+        state.list.scrollTop - excess * state.virtualRowHeight
+      );
+    }
+  }
+
+  function renderVirtualWindow() {
+    if (!state.list || !state.virtualWindow) return;
+    const total = state.messages.length;
+    const viewport = virtualViewportHeight();
+    const visibleRows = Math.ceil(viewport / state.virtualRowHeight);
+    const windowSize = visibleRows + VIRTUAL_OVERSCAN * 2;
+    const start = state.followLatest
+      ? Math.max(0, total - windowSize)
+      : Math.max(
+        0,
+        Math.min(
+          Math.floor(state.list.scrollTop / state.virtualRowHeight) - VIRTUAL_OVERSCAN,
+          Math.max(0, total - windowSize)
+        )
+      );
+    const end = Math.min(total, start + windowSize);
+
+    if (
+      !state.virtualDirty &&
+      start === state.virtualStart &&
+      end === state.virtualEnd
+    ) {
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (let index = start; index < end; index += 1) {
+      fragment.append(createMessageRow(state.messages[index]));
+    }
+    state.virtualWindow.replaceChildren(fragment);
+    state.virtualTop.style.height = `${start * state.virtualRowHeight}px`;
+    state.virtualBottom.style.height = `${(total - end) * state.virtualRowHeight}px`;
+    state.virtualStart = start;
+    state.virtualEnd = end;
+    state.virtualDirty = false;
+
+    if (state.followLatest) {
+      state.list.scrollTop = effectiveScrollHeight();
+      state.unreadCount = 0;
+    }
+    updateJumpButton();
+  }
+
+  function scheduleVirtualRender() {
+    if (state.virtualRenderFrame) return;
+    const interactionDelay = state.replyInteractionUntil - Date.now();
+    if (interactionDelay > 0) {
+      state.virtualRenderFrame = 1;
+      setTimeout(() => {
+        state.virtualRenderFrame = 0;
+        scheduleVirtualRender();
+      }, interactionDelay);
+      return;
+    }
+    state.virtualRenderFrame = 1;
+    queueMicrotask(() => {
+      state.virtualRenderFrame = 0;
+      renderVirtualWindow();
+    });
+  }
+
+  function normalizeEchoText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  }
+
+  function composerDraftText(input) {
+    if (!input) return "";
+    return collectFragments(input)
+      .map((fragment) => fragment.value || fragment.alt || "")
+      .join("");
+  }
+
+  function rememberOutgoingDraft(value) {
+    const text = normalizeEchoText(value);
+    if (!text) return false;
+    const now = Date.now();
+    state.outgoingDrafts = state.outgoingDrafts.filter(
+      (draft) => now - draft.createdAt < OUTGOING_ECHO_TTL
+    );
+    state.outgoingDrafts.push({
+      text,
+      createdAt: now,
+      matches: 0,
+      username: ""
+    });
+    return true;
+  }
+
+  function captureOutgoingEnter(event) {
+    if (
+      event.key !== "Enter" ||
+      event.shiftKey ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.isComposing ||
+      event.defaultPrevented
+    ) {
+      return;
+    }
+    const input = event.target?.closest?.(SELECTORS.nativeInput);
+    if (input) rememberOutgoingDraft(composerDraftText(input));
+  }
+
+  function captureOutgoingClick(event) {
+    const button = event.target?.closest?.("[data-a-target='chat-send-button']");
+    if (!button || !event.currentTarget.contains(button)) return;
+    const input = event.currentTarget.querySelector(SELECTORS.nativeInput);
+    rememberOutgoingDraft(composerDraftText(input));
+  }
+
+  function isDuplicateOutgoingEcho(message) {
+    const text = normalizeEchoText(message.text);
+    if (!text) return false;
+    const now = Date.now();
+    state.outgoingDrafts = state.outgoingDrafts.filter(
+      (draft) => now - draft.createdAt < OUTGOING_ECHO_TTL
+    );
+    const index = state.outgoingDrafts.findLastIndex(
+      (draft) => draft.text === text
+    );
+    if (index < 0) return false;
+
+    const draft = state.outgoingDrafts[index];
+    const username = String(message.username || "").trim().toLowerCase();
+    if (draft.matches === 0) {
+      draft.matches = 1;
+      draft.username = username;
+      return false;
+    }
+    if (draft.username && username !== draft.username) return false;
+    if (!draft.username && username) draft.username = username;
+    draft.matches += 1;
+    return true;
+  }
+
+  function appendMessage(message) {
+    if (!message || state.seen.has(message.id)) return;
+    state.seen.add(message.id);
+    if (isDuplicateOutgoingEcho(message)) return;
+    if (state.seen.size > state.settings.maxMessages * 2) {
+      state.seen = new Set(Array.from(state.seen).slice(-state.settings.maxMessages));
+    }
+
+    state.messages.push({
+      ...message,
+      timestamp: message.timestamp || Date.now(),
+      usernameNode: null,
+      nativeNode: null
+    });
+    trimMessageHistory();
+    if (state.threadAnchor) renderThread(state.threadAnchor);
+    if (state.followLatest) state.unreadCount = 0;
+    else state.unreadCount += 1;
+    state.virtualDirty = true;
+    scheduleVirtualRender();
+  }
+
+  function detectModerator(scope = document) {
+    if (
+      document.querySelector(
+        "[data-a-target='mod-view-button'], [data-test-selector='mod-view-link'], a[href*='/moderator/']"
+      )
+    ) {
+      return true;
+    }
+    const viewer = findViewerName().toLowerCase();
+    if (!viewer) return false;
+    for (const message of scope.querySelectorAll?.(SELECTORS.message) || []) {
+      const username =
+        message.querySelector("[data-a-user]")?.getAttribute("data-a-user") ||
+        message.querySelector("[data-a-target='chat-message-username']")?.textContent ||
+        "";
+      if (username.trim().toLowerCase() !== viewer) continue;
+      const badgeText = Array.from(
+        message.querySelectorAll("img[alt], [data-a-target='chat-badge']")
+      ).map((node) => `${node.getAttribute("alt") || ""} ${node.textContent || ""}`).join(" ");
+      if (/\b(moderator|broadcaster)\b/i.test(badgeText)) return true;
+    }
+    return false;
+  }
+
+  function buildModeratorActions(message) {
+    const actions = document.createElement("span");
+    actions.className = "chatty-mod-actions";
+    const definitions = [
+      ["delete", "Del", "Delete this message"],
+      ["timeout", "10m", `Timeout ${message.username} for 10 minutes`],
+      ["ban", "Ban", `Ban ${message.username}`]
+    ];
+    for (const [action, label, title] of definitions) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.modAction = action;
+      button.textContent = label;
+      button.title = title;
+      button.addEventListener("click", (event) => {
+        event.stopPropagation();
+        runModeratorAction(action, message);
+      });
+      actions.append(button);
+    }
+    return actions;
+  }
+
+  function runModeratorAction(action, message) {
+    if (!state.isModerator) return;
+    if (action === "ban" && !window.confirm(`Ban ${message.username}?`)) return;
+    const command = action === "delete"
+      ? `/delete ${message.id}`
+      : action === "timeout"
+        ? `/timeout ${message.username} 600`
+        : `/ban ${message.username}`;
+    sendNativeCommand(command);
+  }
+
+  function sendNativeCommand(command) {
+    const input = state.nativeComposer?.querySelector(SELECTORS.nativeInput);
+    const send = state.nativeComposer?.querySelector("[data-a-target='chat-send-button']");
+    const selection = window.getSelection();
+    if (!input || !send || !selection) {
+      setStatus("Moderator command unavailable");
+      return;
+    }
+    const previousDraft = input.textContent || "";
+    input.focus();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const inserted = document.execCommand("insertText", false, command);
+    if (!inserted) {
+      input.textContent = command;
+      input.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+        data: command
+      }));
+    }
+    send.click();
+    setStatus(`Moderator action sent for ${command.split(" ")[1] || "message"}`);
+    if (previousDraft) {
+      setTimeout(() => {
+        input.textContent = previousDraft;
+        input.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: previousDraft
+        }));
+      }, 80);
+    }
   }
 
   function twitchEmoteId(src) {
@@ -679,16 +1720,20 @@
     image.dataset.emoteId = emote.id || "";
     image.setAttribute(
       "aria-label",
-      `${image.dataset.emoteName} — ${image.dataset.provider} emote`
+      `${image.dataset.emoteName} - ${image.dataset.provider} emote`
     );
   }
 
   function openUserCard(message) {
     let usernameNode = message.usernameNode;
     if (!usernameNode?.isConnected) {
-      const escaped = CSS.escape(message.username.toLowerCase());
-      const nodes = state.nativeContainer?.querySelectorAll(`[data-a-user="${escaped}"]`);
-      usernameNode = nodes?.[nodes.length - 1];
+      const username = message.username.toLowerCase();
+      const nodes = Array.from(
+        state.nativeContainer?.querySelectorAll("[data-a-user]") || []
+      ).filter((node) =>
+        node.getAttribute("data-a-user")?.toLowerCase() === username
+      );
+      usernameNode = nodes[nodes.length - 1];
     }
     if (usernameNode) {
       usernameNode.dispatchEvent(new MouseEvent("click", {
@@ -701,13 +1746,135 @@
     setStatus(`User card unavailable for ${message.username}`);
   }
 
+  function findNativeMessage(message) {
+    const candidates = Array.from(
+      state.nativeContainer?.querySelectorAll(SELECTORS.message) || []
+    ).reverse();
+    const exact = candidates.find((node) =>
+      node.getAttribute("data-id") === message.id ||
+      node.querySelector("[data-a-target='chat-message-text']")?.id === message.id
+    );
+    if (exact) return exact;
+
+    const expectedUser = String(message.username || "").trim().toLowerCase();
+    const expectedText = normalizeEchoText(message.text);
+    return candidates.find((node) => {
+      const replyContext = findReplyContextNode(node);
+      const usernameNode = currentUsernameNode(node, replyContext);
+      const username = (
+        usernameNode?.getAttribute("data-a-user") ||
+        usernameNode?.textContent ||
+        ""
+      ).trim().toLowerCase();
+      const body = currentMessageBody(node, replyContext);
+      if (!body) return false;
+      const text = collectFragments(body)
+        .map((fragment) => fragment.value || fragment.alt || "")
+        .join("");
+      if (username !== expectedUser || normalizeEchoText(text) !== expectedText) return false;
+      if (!message.reply) return true;
+      return readReplyContext(node)?.signature === message.reply.signature;
+    }) || null;
+  }
+
+  function nativeReplyScopes(messageNode) {
+    if (!messageNode) return [];
+    const scopes = [messageNode];
+    let parent = messageNode.parentElement;
+    for (let depth = 0; parent && depth < 3; depth += 1) {
+      if (state.nativeContainer && !state.nativeContainer.contains(parent)) break;
+      if (parent.querySelectorAll(SELECTORS.message).length > 1) break;
+      scopes.push(parent);
+      parent = parent.parentElement;
+    }
+    return scopes;
+  }
+
+  function nativeReplyButton(messageNode) {
+    const selector = [
+      "button[data-test-selector='chat-reply-button']",
+      "[data-test-selector='chat-reply-button'] button",
+      "[data-a-target='chat-message-reply-button']",
+      "button[data-test-selector='chat-message-reply-button']",
+      ".chat-line__reply-icon button",
+      "button[aria-label^='Click to reply to @' i]",
+      "button[aria-label^='Reply to ' i]",
+      "button[aria-label='Reply' i]"
+    ].join(",");
+    for (const scope of nativeReplyScopes(messageNode)) {
+      const button = scope.querySelector(selector);
+      if (button) return button;
+    }
+    return null;
+  }
+
+  function openNativeReply(message) {
+    const nativeMessage = findNativeMessage(message);
+    if (!nativeMessage) {
+      setStatus(`Reply unavailable for ${message.username}`);
+      return;
+    }
+
+    for (const scope of nativeReplyScopes(nativeMessage)) {
+      for (const type of ["pointerover", "mouseover", "mouseenter"]) {
+        scope.dispatchEvent(new MouseEvent(type, {
+          bubbles: type !== "mouseenter",
+          cancelable: true,
+          view: window
+        }));
+      }
+    }
+    const activate = () => {
+      const button = nativeReplyButton(nativeMessage);
+      if (!button) return false;
+      button.click();
+      setStatus(`Replying to ${message.username}`);
+      return true;
+    };
+    if (!activate()) {
+      let attempts = 0;
+      const retry = () => {
+        if (activate()) return;
+        attempts += 1;
+        if (attempts >= 12) {
+          setStatus(`Reply unavailable for ${message.username}`);
+          return;
+        }
+        setTimeout(retry, 25);
+      };
+      setTimeout(retry, 25);
+    }
+  }
+
+  function revealFilteredMessage(node) {
+    const button = Array.from(node.querySelectorAll("button")).find((candidate) => {
+      if (state.revealedFilterButtons.has(candidate)) return false;
+      const label = `${candidate.getAttribute("aria-label") || ""} ${candidate.textContent || ""}`;
+      return (
+        candidate.matches("[data-a-target*='blocked' i], [data-test-selector*='blocked' i]") ||
+        candidate.closest("[data-a-target*='blocked' i], [data-test-selector*='blocked' i]") ||
+        /\b(show|reveal|unhide)\b.*\bmessage\b/i.test(label)
+      );
+    });
+    if (!button) return false;
+    state.revealedFilterButtons.add(button);
+    button.click();
+    setTimeout(() => {
+      state.processedNodes.delete(node);
+      ingest(node);
+    }, 0);
+    return true;
+  }
+
   function ingest(scope = document) {
     for (const node of scope.querySelectorAll?.(SELECTORS.message) || []) {
       if (state.processedNodes.has(node)) continue;
+      if (revealFilteredMessage(node)) continue;
       state.processedNodes.add(node);
       appendMessage(readMessage(node));
     }
     if (scope.matches?.(SELECTORS.message) && !state.processedNodes.has(scope)) {
+      if (revealFilteredMessage(scope)) return;
       state.processedNodes.add(scope);
       appendMessage(readMessage(scope));
     }
@@ -716,6 +1883,8 @@
   function observeNative(container) {
     state.observer?.disconnect();
     state.nativeContainer = container;
+    state.isModerator = detectModerator(container);
+    state.root?.classList.toggle("chatty-is-moderator", state.isModerator);
     ingest(container);
     state.observer = new MutationObserver((records) => {
       for (const record of records) {
@@ -738,13 +1907,8 @@
       response.data.global,
       response.data.channelSet
     ]);
-    if (state.nativeContainer && state.list) {
-      state.list.replaceChildren();
-      state.seen.clear();
-      state.processedNodes = new WeakSet();
-      ingest(state.nativeContainer);
-      state.list.scrollTop = state.list.scrollHeight;
-    }
+    state.virtualDirty = true;
+    scheduleVirtualRender();
     setStatus(`${state.emotes.size} emotes`);
   }
 
@@ -758,26 +1922,59 @@
     document.querySelector(".chatty-host")?.classList.remove("chatty-host");
     state.root = null;
     state.list = null;
+    state.virtualWindow = null;
+    state.virtualTop = null;
+    state.virtualBottom = null;
+    state.messages = [];
+    state.virtualStart = -1;
+    state.virtualEnd = -1;
+    state.virtualRenderFrame = 0;
+    state.virtualDirty = false;
+    state.replyInteractionUntil = 0;
+    state.threadAnchor = null;
+    state.followLatest = true;
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;
     state.nativeComposerResizeObserver = null;
     state.seen.clear();
+    state.outgoingDrafts = [];
     state.processedNodes = new WeakSet();
     state.claimedPointButtons = new WeakSet();
+    state.revealedFilterButtons = new WeakSet();
+    state.unreadCount = 0;
+    state.isModerator = false;
+    state.pinnedSignature = "";
+    state.dismissedPinnedSignature = "";
+    state.predictionSignature = "";
     document.documentElement.classList.remove("chatty-active");
   }
 
   async function mount() {
     if (!state.settings.enabled) return;
     const channel = channelFromLocation();
-    const shell = first(SELECTORS.chatShell);
+    const readyShell = findChatShell(true);
+    const shell = readyShell || findChatShell();
     if (!channel || !shell) return;
-    if (state.root && state.channel === channel && state.root.isConnected) return;
+    const host = shell.querySelector(".chat-room__content") || shell;
+    if (
+      state.root &&
+      state.channel === channel &&
+      state.root.isConnected &&
+      state.root.parentElement === host &&
+      state.nativeContainer?.isConnected &&
+      state.nativeContainer === findNativeContainer(shell)
+    ) {
+      syncNativeComposer(host);
+      return;
+    }
+    if (state.root?.isConnected && state.channel === channel && !readyShell) {
+      setStatus("Waiting for chat…");
+      return;
+    }
 
     unmount();
     state.channel = channel;
-    const host = shell.querySelector(".chat-room__content") || shell;
     buildPanel(host);
     const nativeContainer = findNativeContainer(shell);
     if (!nativeContainer) {
@@ -790,24 +1987,50 @@
   }
 
   function scheduleMount() {
-    clearTimeout(state.rescanTimer);
-    state.rescanTimer = setTimeout(mount, 350);
+    if (state.rescanTimer) return;
+    state.rescanTimer = setTimeout(() => {
+      state.rescanTimer = 0;
+      mount();
+    }, 100);
   }
 
   async function boot() {
     const stored = await chrome.storage.sync.get("chattySettings");
     state.settings = core.sanitizeSettings(stored.chattySettings);
-    const pageObserver = new MutationObserver(() => {
+    const pageObserver = new MutationObserver((records) => {
+      const externalRecords = records.filter((record) => !state.root?.contains(record.target));
       if (window.location.href !== state.route) {
         state.route = window.location.href;
         scheduleMount();
       } else if (!state.root?.isConnected) {
         scheduleMount();
+      } else if (
+        !state.nativeContainer?.isConnected &&
+        mutationsTouchSelector(externalRecords, SELECTORS.chatReady)
+      ) {
+        scheduleMount();
       }
-      if (state.root && !state.nativeComposer?.isConnected) {
+      const featureRecords = pageFeatureMutationRecords(records);
+      if (
+        featureRecords.length &&
+        state.root?.isConnected &&
+        !state.nativeComposer?.isConnected &&
+        mutationsTouchSelector(featureRecords, SELECTORS.composer)
+      ) {
         syncNativeComposer(state.root.parentElement);
       }
-      schedulePointsScan();
+      if (featureRecords.length && mutationsTouchSelector(featureRecords, SELECTORS.pinned)) {
+        syncPinnedMessage();
+      }
+      if (
+        featureRecords.length &&
+        mutationsTouchSelector(featureRecords, SELECTORS.predictionMutation)
+      ) {
+        syncPrediction();
+      }
+      if (featureRecords.length && mutationsTouchSelector(featureRecords, SELECTORS.pointsClaim)) {
+        schedulePointsScan();
+      }
     });
     pageObserver.observe(document.documentElement, { childList: true, subtree: true });
     chrome.storage.onChanged.addListener((changes, area) => {

@@ -1,0 +1,39 @@
+name: Verify extension
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build extension package
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Upload verified package
+        uses: actions/upload-artifact@v7
+        with:
+          name: chatty-for-twitch-${{ github.sha }}
+          path: dist/chatty-for-twitch.zip
