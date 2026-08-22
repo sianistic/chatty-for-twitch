@@ -1,0 +1,125 @@
+name: Publish to Chrome Web Store
+
+on:
+  workflow_dispatch:
+    inputs:
+      submit_for_review:
+        description: Submit the uploaded package for Chrome Web Store review
+        required: true
+        type: boolean
+        default: false
+  release:
+    types:
+      - published
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: chrome-web-store-publish
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    environment: chrome-web-store
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build extension package
+        shell: pwsh
+        run: ./scripts/package.ps1
+
+      - name: Upload verified package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: chatty-for-twitch-${{ github.sha }}
+          path: dist/chatty-for-twitch.zip
+
+      - name: Validate Chrome Web Store configuration
+        env:
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+          WIF_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          SERVICE_ACCOUNT: ${{ vars.CHROME_WEBSTORE_SERVICE_ACCOUNT }}
+        run: |
+          test -n "$PUBLISHER_ID" || { echo "Missing CHROME_WEBSTORE_PUBLISHER_ID"; exit 1; }
+          test -n "$EXTENSION_ID" || { echo "Missing CHROME_WEBSTORE_EXTENSION_ID"; exit 1; }
+          test -n "$WIF_PROVIDER" || { echo "Missing GCP_WORKLOAD_IDENTITY_PROVIDER"; exit 1; }
+          test -n "$SERVICE_ACCOUNT" || { echo "Missing CHROME_WEBSTORE_SERVICE_ACCOUNT"; exit 1; }
+
+      - name: Authenticate to Google Cloud
+        id: google-auth
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.CHROME_WEBSTORE_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+          create_credentials_file: false
+
+      - name: Upload package to Chrome Web Store
+        env:
+          ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+        run: |
+          curl --fail-with-body --silent --show-error             --request POST             --header "Authorization: Bearer $ACCESS_TOKEN"             --header "Content-Type: application/zip"             --data-binary @dist/chatty-for-twitch.zip             "https://chromewebstore.googleapis.com/upload/v2/publishers/$PUBLISHER_ID/items/$EXTENSION_ID:upload"             | tee /tmp/chrome-web-store-upload.json
+          jq . /tmp/chrome-web-store-upload.json
+
+      - name: Wait for package validation
+        env:
+          ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+        run: |
+          for attempt in $(seq 1 30); do
+            response="$(curl --fail-with-body --silent --show-error               --header "Authorization: Bearer $ACCESS_TOKEN"               "https://chromewebstore.googleapis.com/v2/publishers/$PUBLISHER_ID/items/$EXTENSION_ID:fetchStatus")"
+            state="$(jq -r '.lastAsyncUploadState // "UNKNOWN"' <<< "$response")"
+            echo "Validation attempt $attempt: $state"
+
+            case "$state" in
+              SUCCEEDED)
+                exit 0
+                ;;
+              FAILED)
+                jq . <<< "$response"
+                exit 1
+                ;;
+              IN_PROGRESS|UNKNOWN)
+                sleep 10
+                ;;
+              *)
+                jq . <<< "$response"
+                echo "Unexpected upload state: $state"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "Timed out waiting for Chrome Web Store validation."
+          exit 1
+
+      - name: Submit package for review
+        if: ${{ github.event_name == 'release' || inputs.submit_for_review }}
+        env:
+          ACCESS_TOKEN: ${{ steps.google-auth.outputs.access_token }}
+          PUBLISHER_ID: ${{ vars.CHROME_WEBSTORE_PUBLISHER_ID }}
+          EXTENSION_ID: ${{ vars.CHROME_WEBSTORE_EXTENSION_ID }}
+        run: |
+          curl --fail-with-body --silent --show-error             --request POST             --header "Authorization: Bearer $ACCESS_TOKEN"             --header "Content-Type: application/json"             --data '{"publishType":"DEFAULT_PUBLISH","blockOnWarnings":true}'             "https://chromewebstore.googleapis.com/v2/publishers/$PUBLISHER_ID/items/$EXTENSION_ID:publish"             | jq .
