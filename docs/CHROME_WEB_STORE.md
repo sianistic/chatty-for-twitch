@@ -25,7 +25,7 @@ Chatty for Twitch
 
 **Category**
 
-Social & Communication
+Communication
 
 **Summary**
 
@@ -57,18 +57,16 @@ Twitch Channel Points used in Predictions are non-purchasable, have no monetary 
 
 **Homepage URL**
 
-https://github.com/sianistic/chatty-for-twitch
+https://chatty-for-twitch.pages.dev/
 
 **Support URL**
 
-https://github.com/sianistic/chatty-for-twitch/issues
+https://discord.gg/Mr8xsV67N6
 
 **Privacy policy URL**
 
 https://github.com/sianistic/chatty-for-twitch/blob/main/PRIVACY.md
 
-The privacy URL will work after the pull request containing `PRIVACY.md` is
-merged into `main`.
 
 ## Privacy practices
 
@@ -169,3 +167,46 @@ consistent across the icon, screenshots, and promotional graphics.
 4. Upload the required graphics.
 5. Recheck that dashboard data disclosures match `PRIVACY.md`.
 6. Submit for review. Use deferred publishing if you want to choose the release time after approval.
+
+## Automated uploads from GitHub
+
+The `.github/workflows/publish-chrome-web-store.yml` workflow packages and
+tests Chatty before uploading it through Chrome Web Store API V2.
+
+- Publishing a GitHub Release uploads the package and submits it for review.
+- **Actions → Publish to Chrome Web Store → Run workflow** can upload on demand.
+  Leave **Submit the uploaded package for Chrome Web Store review** off to stage
+  a package without submitting it.
+- Increment the version in `manifest.json` before uploading a new release.
+
+### One-time keyless authentication setup
+
+The workflow uses GitHub OpenID Connect and Google Cloud Workload Identity
+Federation. It deliberately does not store a long-lived Google service-account
+JSON key in GitHub.
+
+1. In Google Cloud, enable **Chrome Web Store API** and create a service account.
+2. In the Chrome Web Store Developer Dashboard, link that service-account email
+   to the publisher account.
+3. Create a Workload Identity Pool and Provider that trusts only this GitHub
+   repository, then grant the provider permission to impersonate the service
+   account.
+4. In the repository's **Settings → Environments**, create an environment named
+   `chrome-web-store`. Add required reviewers if release approval is desired.
+5. Add these GitHub repository or environment variables:
+
+   - `GCP_WORKLOAD_IDENTITY_PROVIDER`: full Google provider resource name
+   - `CHROME_WEBSTORE_SERVICE_ACCOUNT`: service-account email address
+   - `CHROME_WEBSTORE_PUBLISHER_ID`: Chrome Web Store publisher ID
+   - `CHROME_WEBSTORE_EXTENSION_ID`: Chatty extension ID
+
+For this listing, the current identifiers are:
+
+```text
+CHROME_WEBSTORE_PUBLISHER_ID=c454fcc9-3d9c-4b9a-8f99-a293ae2807c6
+CHROME_WEBSTORE_EXTENSION_ID=bmhholegchlkijagijghkjbofmcogndj
+```
+
+Keep the Workload Identity Provider restricted to
+`sianistic/chatty-for-twitch`. Removing the service-account association in the
+Chrome Web Store dashboard disables future automated uploads.
