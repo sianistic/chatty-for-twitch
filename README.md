@@ -28,7 +28,8 @@ and Predictions interfaces in control of account-sensitive actions.
 - Custom username and phrase highlights, plus automatic mention highlighting
 - Clickable links, visible filtered messages, pinned messages, and
   Channel Point reward styling
-- A virtualized message list that keeps long and fast-moving chats responsive
+- Find in Chat searches loaded messages by phrase or `@username`
+- A virtualized list reuses visible rows and keeps your place in busy chats
 
 ### Native Twitch interactions
 
@@ -57,8 +58,7 @@ Both automation features are disabled by default.
 
 ### Chrome Web Store
 
-The store listing is being prepared. Its link will be added here after Google
-approves the first release.
+[Install Chatty for Twitch from the Chrome Web Store](https://chromewebstore.google.com/detail/bmhholegchlkijagijghkjbofmcogndj).
 
 ### Load the unpacked extension
 
@@ -79,6 +79,12 @@ The toolbar popup enables or disables the replacement chat. The settings button
 in Chatty's header controls timestamps, density, font size, retained-message
 count, highlight rules, highlight colors, point claiming, and live-channel
 monitoring.
+
+Click the magnifying glass in Chatty's header to find a phrase, an exact
+`@username`, or a phrase from a specific user (for example, `@alice hello`).
+Use Enter to go to an older match, Shift+Enter for a newer one, and Escape to
+close search. Use **Jump to latest** to return to live chat. Search covers
+messages retained in the current tab.
 
 Chatty deliberately delegates chat sending, Channel Point spending, user cards,
 moderation commands, and Prediction participation to Twitch's own authenticated
@@ -111,6 +117,10 @@ npm run package
 The release archive is written to
 [`dist/chatty-for-twitch.zip`](dist/chatty-for-twitch.zip). Upload that ZIP to
 the Chrome Web Store; do not ZIP the repository root manually.
+
+Run `npm run test:browser` with Node.js 22 or newer and Chrome to exercise
+scrolling, Find in Chat, and chat bursts in a real browser. Set `CHROME_BIN`
+if Chrome is installed in a non-default location.
 
 ## Compatibility and limitations
 

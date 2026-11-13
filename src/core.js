@@ -99,25 +99,28 @@
       .replace(/\\n/g, "\n");
   }
 
-  function getHighlight(message, settings, viewerName) {
+  function createHighlightMatcher(settings, viewerName) {
     const clean = sanitizeSettings(settings);
-    const username = String(message.username || "").toLowerCase();
-    const text = String(message.text || "");
-    const lowered = text.toLowerCase();
-    const userMatch = clean.highlightUsers.some(
-      (item) => item.replace(/^@/, "").toLowerCase() === username
-    );
-    const wordMatch = clean.highlightWords.some((item) =>
-      lowered.includes(item.toLowerCase())
-    );
+    const users = new Set(clean.highlightUsers.map((item) => item.replace(/^@/, "").toLowerCase()));
+    const words = clean.highlightWords.map((item) => item.toLowerCase());
     const viewer = String(viewerName || "").replace(/^@/, "").toLowerCase();
-    const mentionMatch =
-      Boolean(viewer) &&
-      new RegExp(`(^|\\W)@?${escapeRegExp(viewer)}(\\W|$)`, "i").test(text);
+    const mention = viewer ? new RegExp(`(^|\\W)@?${escapeRegExp(viewer)}(\\W|$)`, "i") : null;
 
-    if (mentionMatch) return { type: "mention", color: clean.mentionColor };
-    if (userMatch || wordMatch) return { type: "custom", color: clean.highlightColor };
-    return null;
+    return (message) => {
+      const text = String(message.text || "");
+      if (mention?.test(text)) return { type: "mention", color: clean.mentionColor };
+      if (users.has(String(message.username || "").toLowerCase())) {
+        return { type: "custom", color: clean.highlightColor };
+      }
+      const lowered = words.length ? text.toLowerCase() : "";
+      return words.some((word) => lowered.includes(word))
+        ? { type: "custom", color: clean.highlightColor }
+        : null;
+    };
+  }
+
+  function getHighlight(message, settings, viewerName) {
+    return createHighlightMatcher(settings, viewerName)(message);
   }
 
   function escapeRegExp(value) {
@@ -201,6 +204,7 @@
     normalizeChannels,
     sanitizeSettings,
     escapeTag,
+    createHighlightMatcher,
     getHighlight,
     indexEmotes,
     tokenizeEmotes,

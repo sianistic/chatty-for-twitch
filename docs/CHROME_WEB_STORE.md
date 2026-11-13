@@ -1,7 +1,7 @@
 # Chrome Web Store Submission Guide
 
 This file contains the release-specific copy and declarations for Chatty for
-Twitch 0.9.1. Keep the dashboard answers, store description, privacy policy,
+Twitch 0.10.0. Keep the dashboard answers, store description, privacy policy,
 and actual extension behavior consistent.
 
 ## Upload package
@@ -42,6 +42,7 @@ Features:
 • Compact messages, timestamps, Twitch badges, and username colors
 • Custom username, phrase, and mention highlights
 • Clickable links, pinned messages, reply previews, and loaded-message threads
+• Find in Chat searches messages loaded in the tab by phrase or username
 • Native Twitch message sending, user cards, replies, Channel Points, and Predictions
 • Moderator delete, timeout, and ban shortcuts when available
 • Virtualized chat rendering for busy channels
@@ -146,6 +147,7 @@ reviewer to use their own Twitch account.
 6. Hover messages, usernames, badges, and emotes to test reply controls and metadata.
 7. Channel Points, Predictions, user cards, message sending, and moderation continue through Twitch's native authenticated controls and depend on the account/channel state.
 8. Optional point claiming and live-channel monitoring are disabled by default and can be enabled from Chatty settings.
+9. Use the magnifying glass to find a loaded message by phrase or @username. Jump to latest returns to live chat.
 ```
 
 ## Required listing graphics

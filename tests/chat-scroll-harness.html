@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Chatty scroll regression harness</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #0e0e10;
+      }
+
+      .stream-chat {
+        position: relative;
+        display: flex;
+        width: 340px;
+        height: 640px;
+        flex-direction: column;
+      }
+
+      .chat-room__content {
+        position: relative;
+        display: flex;
+        min-height: 0;
+        flex: 1 1 auto;
+        flex-direction: column;
+      }
+
+      [data-a-target="chat-scroller"] {
+        min-height: 0;
+        flex: 1 1 auto;
+        overflow: auto;
+      }
+
+      .chat-input {
+        flex: 0 0 90px;
+        height: 90px;
+      }
+    </style>
+    <link rel="stylesheet" href="../src/twitch.css">
+  </head>
+  <body>
+    <main class="stream-chat">
+      <div class="chat-room__content">
+        <div data-a-target="chat-scroller"></div>
+        <div class="chat-input">
+          <div data-a-target="chat-input" contenteditable="true"></div>
+          <button data-a-target="chat-send-button" type="button">Send</button>
+        </div>
+      </div>
+    </main>
+    <pre id="result" data-status="pending">PENDING</pre>
+    <script>
+      globalThis.chrome = {
+        runtime: {
+          getURL: (path) => new URL(`../${path}`, location).href,
+          sendMessage: async () => ({ ok: false }),
+        },
+        storage: {
+          sync: {
+            get: async () => ({
+              chattySettings: {
+                enabled: true,
+                compact: true,
+                timestamps: true,
+                maxMessages: 500,
+              },
+            }),
+            set: async () => {},
+          },
+          onChanged: { addListener: () => {} },
+        },
+      };
+
+      const nativeList = document.querySelector("[data-a-target='chat-scroller']");
+      function nativeMessage(index, name = `viewer${index}`, text) {
+        const row = document.createElement("div");
+        row.className = "chat-line__message";
+        row.dataset.id = `message-${index}`;
+        const username = document.createElement("span");
+        username.dataset.aTarget = "chat-message-username";
+        username.textContent = name;
+        username.style.color = "rgb(169, 112, 255)";
+        const body = document.createElement("span");
+        body.dataset.aTarget = "chat-line-message-body";
+        body.textContent = text ?? (index % 4 === 0
+          ? "This deliberately long Twitch message wraps over several visual lines so the harness exercises real variable-height chat rows. ".repeat(3)
+          : `Short message ${index}`);
+        row.append(username, body);
+        return row;
+      }
+
+      const messageCount = 24;
+      for (let index = 0; index < messageCount; index += 1) {
+        nativeList.append(nativeMessage(index));
+      }
+    </script>
+    <script src="../src/core.js"></script>
+    <script src="../src/content.js"></script>
+    <script>
+      const result = document.querySelector("#result");
+      const nextFrame = () => new Promise((resolve) => requestAnimationFrame(resolve));
+
+      function check(condition, message) {
+        if (!condition) throw new Error(message);
+      }
+
+      async function settle(frames = 4) {
+        for (let index = 0; index < frames; index += 1) await nextFrame();
+      }
+
+      async function measureBurst(list) {
+        const incoming = 60;
+        let mounted = 0;
+        const rows = list.querySelector(".chatty-virtual-window");
+        const observer = new MutationObserver((records) => {
+          for (const record of records) mounted += record.addedNodes.length;
+        });
+        observer.observe(rows, { childList: true });
+        for (let index = messageCount; index < messageCount + incoming; index += 1) {
+          nativeList.append(nativeMessage(index));
+          await settle(1);
+        }
+        await settle(4);
+        observer.disconnect();
+        if (!rows.querySelector(`[data-message-id='message-${messageCount + incoming - 1}']`)) {
+          throw new Error("the latest burst message did not render");
+        }
+        if (mounted > incoming + 2) {
+          throw new Error(`mounted ${mounted} chat rows for ${incoming} incoming messages`);
+        }
+        result.dataset.status = "pass";
+        result.textContent = `PASS burst: mounted ${mounted} chat rows for ${incoming} incoming messages`;
+      }
+
+      async function checkSearch(list) {
+        const search = document.querySelector("#chatty-search");
+        const input = search.querySelector("input");
+        const status = search.querySelector("[role='status']");
+        const jump = document.querySelector(".chatty-jump");
+        const older = search.querySelector(".chatty-search-older");
+        document.querySelector("[aria-controls='chatty-search']").click();
+        const query = (value) => {
+          input.value = value;
+          input.dispatchEvent(new Event("input", { bubbles: true }));
+        };
+        const match = () => list.querySelector(".chatty-search-match");
+        const visible = (row) => {
+          if (!row) return false;
+          const bounds = row.getBoundingClientRect();
+          const viewport = list.getBoundingClientRect();
+          return bounds.top >= viewport.top - 1 && bounds.bottom <= viewport.bottom + 1;
+        };
+
+        query("short message");
+        await settle();
+        check(match()?.dataset.messageId === "message-139" && visible(match()), "phrase search missed the newest match");
+        older.click();
+        await settle();
+        check(match()?.dataset.messageId === "message-138" && visible(match()), "older match was not in view");
+        query("@viewer23 SHORT MESSAGE");
+        await settle();
+        const selected = match();
+        check(selected?.dataset.messageId === "message-23" && visible(selected), "search missed an older offscreen message");
+        const before = selected.getBoundingClientRect().top - list.getBoundingClientRect().top;
+        nativeList.append(nativeMessage(140, "viewer23", "New short message"));
+        await settle();
+        check(status.textContent === "1 of 2", "search did not count the new match");
+        check(match() === selected && Math.abs(before - (selected.getBoundingClientRect().top - list.getBoundingClientRect().top)) <= 1,
+          "an incoming message moved the selected match");
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true }));
+        await settle();
+        check(match()?.dataset.messageId === "message-140" && visible(match()), "Shift+Enter did not move to the newer match");
+
+        // Keep the selected match while the 500-message buffer evicts the other result.
+        const current = match();
+        const currentTop = current.getBoundingClientRect().top - list.getBoundingClientRect().top;
+        const incoming = document.createDocumentFragment();
+        for (let index = 141; index < 530; index += 1) incoming.append(nativeMessage(index));
+        nativeList.append(incoming);
+        await settle(6);
+        check(status.textContent === "1 of 1" && older.disabled, "search retained an evicted result");
+        check(match() === current && Math.abs(currentTop - (current.getBoundingClientRect().top - list.getBoundingClientRect().top)) <= 1,
+          "trimming chat history moved the selected match");
+
+        input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        check(search.hidden && !match(), "Escape did not close and clear Find in Chat");
+        jump.click();
+        await settle();
+        check(jump.hidden && list.scrollHeight - list.scrollTop - list.clientHeight <= 1,
+          "Jump to latest did not resume following after search");
+      }
+
+      async function run() {
+        const deadline = performance.now() + 1500;
+        let list;
+        while (performance.now() < deadline) {
+          list = document.querySelector(".chatty-list");
+          if (list?.querySelector(`[data-message-id='message-${messageCount - 1}']`)) break;
+          await settle(1);
+        }
+        if (!list?.querySelector(`[data-message-id='message-${messageCount - 1}']`)) {
+          throw new Error("Chatty did not mount its initial messages");
+        }
+
+        if (new URLSearchParams(location.search).get("case") === "burst") {
+          await settle();
+          return measureBurst(list);
+        }
+
+        list.scrollTop = list.scrollHeight;
+        list.dispatchEvent(new Event("scroll"));
+        await settle();
+
+        document.querySelector(".stream-chat").style.height = "360px";
+        await settle(8);
+
+        const last = list.querySelector(`[data-message-id='message-${messageCount - 1}']`);
+        const gap = list.scrollHeight - list.scrollTop - list.clientHeight;
+        const clipped = last.getBoundingClientRect().bottom - list.getBoundingClientRect().bottom;
+        const metrics = {
+          gap: Math.round(gap * 100) / 100,
+          clipped: Math.round(clipped * 100) / 100,
+          clientHeight: list.clientHeight,
+          scrollTop: Math.round(list.scrollTop),
+          scrollHeight: list.scrollHeight,
+        };
+
+        if (gap > 1 || clipped > 1) {
+          throw new Error(`latest message left the viewport after resize: ${JSON.stringify(metrics)}`);
+        }
+
+        const stressMessageCount = 140;
+        const added = document.createDocumentFragment();
+        for (let index = messageCount; index < stressMessageCount; index += 1) {
+          added.append(nativeMessage(index));
+        }
+        nativeList.append(added);
+        await settle(8);
+
+        list.dispatchEvent(new WheelEvent("wheel", { deltaY: -120 }));
+        list.scrollTop = 0;
+        list.dispatchEvent(new Event("scroll"));
+        await settle();
+        if (document.querySelector(".chatty-jump").hidden) {
+          throw new Error("intentional upward scroll did not pause follow-latest mode");
+        }
+
+        for (let step = 0; step < 40; step += 1) {
+          const before = list.scrollTop;
+          list.dispatchEvent(new WheelEvent("wheel", { deltaY: 120 }));
+          list.scrollTop = Math.min(
+            list.scrollHeight - list.clientHeight,
+            before + 120,
+          );
+          list.dispatchEvent(new Event("scroll"));
+          await settle(2);
+          if (list.scrollTop + 1 < before) {
+            throw new Error(
+              `downward scroll moved upward at step ${step}: ${before} -> ${list.scrollTop}`,
+            );
+          }
+        }
+
+        document.querySelector(".chatty-jump").click();
+        await settle(6);
+        const stressLast = list.querySelector(
+          `[data-message-id='message-${stressMessageCount - 1}']`,
+        );
+        const finalGap = list.scrollHeight - list.scrollTop - list.clientHeight;
+        const finalClipped = stressLast.getBoundingClientRect().bottom -
+          list.getBoundingClientRect().bottom;
+        if (finalGap > 1 || finalClipped > 1) {
+          throw new Error(
+            `jump-to-latest left the last message clipped: gap=${finalGap}, clipped=${finalClipped}`,
+          );
+        }
+
+        await checkSearch(list);
+        result.dataset.status = "pass";
+        result.textContent = `PASS resize=${JSON.stringify(metrics)} stress={"gap":${finalGap},"clipped":${finalClipped}} search=pass`;
+      }
+
+      run().catch((error) => {
+        result.dataset.status = "fail";
+        result.textContent = `FAIL ${error.message}`;
+      });
+    </script>
+  </body>
+</html>

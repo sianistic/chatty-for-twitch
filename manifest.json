@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Chatty for Twitch",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "description": "A compact, customizable Twitch chat with 7TV emotes, highlights, replies, and native Twitch controls.",
   "icons": {
     "16": "assets/icons/chatty-16.png",
