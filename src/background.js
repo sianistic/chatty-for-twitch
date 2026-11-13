@@ -3,19 +3,41 @@
 importScripts("core.js");
 
 const CACHE_TTL = 5 * 60 * 1000;
+const MAX_EMOTE_CHANNELS = 16;
+const IDLE_PROBE_TIMEOUT = 1500;
+const TWITCH_TABS = "https://www.twitch.tv/*";
 const LIVE_ALARM = "chatty-live-channel-check";
 const LIVE_STATE_KEY = "chattyLiveStates";
-const cache = new Map();
+const IDLE_ALARM = "canty-idle-twitch-tabs";
+const globalEmotes = new Map();
+const channelEmotes = new Map();
 let liveCheckPromise = null;
+let idleCheckPromise = null;
 
-async function cachedJson(url) {
-  const hit = cache.get(url);
-  if (hit && Date.now() - hit.time < CACHE_TTL) return hit.value;
+function cachedEmotes(cache, key, limit, load) {
+  const now = Date.now();
+  const hit = cache.get(key);
+  if (hit && hit.expiresAt > now) {
+    cache.delete(key);
+    cache.set(key, hit);
+    return hit.promise;
+  }
+  for (const [oldKey, entry] of cache) {
+    if (entry.expiresAt <= now) cache.delete(oldKey);
+  }
+  const entry = { expiresAt: now + CACHE_TTL, promise: load().catch((error) => {
+    if (cache.get(key) === entry) cache.delete(key);
+    throw error;
+  }) };
+  cache.set(key, entry);
+  if (cache.size > limit) cache.delete(cache.keys().next().value);
+  return entry.promise;
+}
+
+async function fetchEmoteSet(url) {
   const response = await fetch(url, { credentials: "omit" });
   if (!response.ok) throw new Error(`Request failed (${response.status})`);
-  const value = await response.json();
-  cache.set(url, { time: Date.now(), value });
-  return value;
+  return [...ChattyCore.indexEmotes([await response.json()]).values()];
 }
 
 async function fetchText(url) {
@@ -24,28 +46,28 @@ async function fetchText(url) {
   return response.text();
 }
 
+async function fetchChannelEmotes(channel) {
+  const id = (await fetchText(`https://decapi.me/twitch/id/${encodeURIComponent(channel)}`)).trim();
+  return /^\d+$/.test(id) ? fetchEmoteSet(`https://7tv.io/v3/users/twitch/${id}`) : [];
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, respond) => {
   if (message?.type !== "CHATTY_FETCH_7TV") return undefined;
 
   (async () => {
-    const channel = String(message.channel || "").toLowerCase();
-    const global = await cachedJson("https://7tv.io/v3/emote-sets/global");
-    let channelSet = null;
-    let channelId = null;
-
-    if (channel && /^[a-z0-9_]+$/.test(channel)) {
-      try {
-        const rawId = await fetchText(`https://decapi.me/twitch/id/${encodeURIComponent(channel)}`);
-        if (/^\d+$/.test(rawId.trim())) {
-          channelId = rawId.trim();
-          channelSet = await cachedJson(`https://7tv.io/v3/users/twitch/${channelId}`);
-        }
-      } catch (error) {
-        console.info("[Chatty] Channel 7TV set unavailable:", error.message);
-      }
-    }
-
-    return { global, channelSet, channelId };
+    const channel = ChattyCore.normalizeChannels([message.channel || ""])[0];
+    const [global, local] = await Promise.all([
+      cachedEmotes(globalEmotes, "global", 1, () => fetchEmoteSet("https://7tv.io/v3/emote-sets/global")),
+      channel ? cachedEmotes(channelEmotes, channel, MAX_EMOTE_CHANNELS, () => fetchChannelEmotes(channel))
+        .catch((error) => {
+          console.info("[Canty] Channel 7TV set unavailable:", error.message);
+          return [];
+        }) : []
+    ]);
+    const emotes = new Map();
+    for (const emote of global) emotes.set(emote.name, emote);
+    for (const emote of local) emotes.set(emote.name, emote);
+    return { emotes: [...emotes.values()] };
   })()
     .then((data) => respond({ ok: true, data }))
     .catch((error) => respond({ ok: false, error: error.message }));
@@ -67,14 +89,14 @@ async function channelIsLive(channel) {
     if (!response.ok) return false;
     return ChattyCore.isLiveStatusText(await response.text());
   } catch (error) {
-    console.info(`[Chatty] Live check failed for ${channel}:`, error.message);
+    console.info(`[Canty] Live check failed for ${channel}:`, error.message);
     return null;
   }
 }
 
 async function findChannelTab(channel) {
   try {
-    const tabs = await chrome.tabs.query({ url: ["https://www.twitch.tv/*"] });
+    const tabs = await chrome.tabs.query({ url: [TWITCH_TABS] });
     return tabs.find((tab) => {
       try {
         const pathParts = new URL(tab.url).pathname.split("/").filter(Boolean);
@@ -85,7 +107,7 @@ async function findChannelTab(channel) {
       }
     });
   } catch (error) {
-    console.info(`[Chatty] Could not inspect existing tabs for ${channel}:`, error.message);
+    console.info(`[Canty] Could not inspect existing tabs for ${channel}:`, error.message);
     return null;
   }
 }
@@ -95,7 +117,7 @@ async function foregroundTab(tabId, windowId) {
     try {
       await chrome.windows.update(windowId, { focused: true });
     } catch (error) {
-      console.info(`[Chatty] Could not focus Twitch window ${windowId}:`, error.message);
+      console.info(`[Canty] Could not focus Twitch window ${windowId}:`, error.message);
     }
   }
   return chrome.tabs.update(tabId, { active: true });
@@ -146,7 +168,7 @@ function scheduleLiveCheck() {
   if (liveCheckPromise) return liveCheckPromise;
   liveCheckPromise = checkLiveChannels()
     .catch((error) => {
-      console.info("[Chatty] Live channel check failed:", error.message);
+      console.info("[Canty] Live channel check failed:", error.message);
     })
     .finally(() => {
       liveCheckPromise = null;
@@ -164,14 +186,87 @@ async function configureLiveAlarm() {
   return scheduleLiveCheck();
 }
 
+function canUnloadTab(tab, cutoff) {
+  if (tab?.id == null || tab.active || tab.pinned || tab.audible || tab.discarded ||
+    tab.incognito || tab.autoDiscardable !== true || tab.pendingUrl || tab.status !== "complete" ||
+    (Number.isInteger(tab.splitViewId) && tab.splitViewId >= 0) ||
+    !Number.isFinite(tab.lastAccessed) || tab.lastAccessed > cutoff) return false;
+  try {
+    const url = new URL(tab.url);
+    return url.origin === "https://www.twitch.tv" && /^\/[a-z0-9_]{1,25}\/?$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+async function probeIdlePage(id) {
+  let timer;
+  try {
+    const response = await Promise.race([
+      chrome.tabs.sendMessage(id, { type: "CANTY_CHECK_IDLE_TAB" }, { frameId: 0 }),
+      new Promise((resolve) => { timer = setTimeout(resolve, IDLE_PROBE_TIMEOUT); })
+    ]);
+    return response?.canUnload === true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function unloadIdleTwitchTabs() {
+  const settings = await readSettings();
+  if (!settings.enabled || !settings.idleTwitchMinutes) return;
+  const cutoff = Date.now() - settings.idleTwitchMinutes * 60000;
+  const tabs = await chrome.tabs.query({ url: [TWITCH_TABS], active: false, audible: false, discarded: false });
+  for (const tab of tabs) {
+    if (!canUnloadTab(tab, cutoff)) continue;
+    if (!await probeIdlePage(tab.id)) continue;
+    try {
+      const current = await chrome.tabs.get(tab.id);
+      if (!canUnloadTab(current, cutoff) || current.url !== tab.url) continue;
+      const latest = await readSettings();
+      if (!latest.enabled || latest.idleTwitchMinutes !== settings.idleTwitchMinutes) return;
+      await chrome.tabs.discard(tab.id);
+    } catch {
+      // The tab may have closed or become active since it was checked.
+    }
+  }
+}
+
+async function configureIdleAlarm() {
+  const settings = await readSettings();
+  if (!settings.enabled || !settings.idleTwitchMinutes) {
+    await chrome.alarms.clear(IDLE_ALARM);
+  } else if (!await chrome.alarms.get(IDLE_ALARM)) {
+    await chrome.alarms.create(IDLE_ALARM, { periodInMinutes: 5 });
+  }
+}
+
+function configureIdleTabs() {
+  return configureIdleAlarm().catch((error) => {
+    console.info("[Canty] Could not schedule idle tab checks:", error.message);
+  });
+}
+
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === LIVE_ALARM) scheduleLiveCheck();
+  if (alarm.name === IDLE_ALARM && !idleCheckPromise) {
+    idleCheckPromise = unloadIdleTwitchTabs().catch((error) => {
+      console.info("[Canty] Idle Twitch tab check failed:", error.message);
+    }).finally(() => { idleCheckPromise = null; });
+  }
 });
 
 chrome.runtime.onInstalled.addListener(configureLiveAlarm);
 chrome.runtime.onStartup.addListener(configureLiveAlarm);
+chrome.runtime.onInstalled.addListener(configureIdleTabs);
+chrome.runtime.onStartup.addListener(configureIdleTabs);
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "sync" && changes.chattySettings) configureLiveAlarm();
+  if (area !== "sync" || !changes.chattySettings) return;
+  configureLiveAlarm();
+  configureIdleTabs();
 });
 
 configureLiveAlarm();
+configureIdleTabs();

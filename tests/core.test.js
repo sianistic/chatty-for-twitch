@@ -48,12 +48,12 @@ test("7TV payloads are indexed and exact tokens become emotes", () => {
   assert.equal(indexed.get("catJAM").owner, "EmoteArtist");
   assert.equal(indexed.get("catJAM").animated, true);
   assert.deepEqual(
-    core.tokenizeEmotes("hi catJAM!", indexed).map((part) => part.type),
-    ["text", "text", "text"]
+    core.tokenizeEmotes("hi catJAM!", indexed),
+    [{ type: "text", value: "hi catJAM!" }]
   );
   assert.deepEqual(
-    core.tokenizeEmotes("hi catJAM", indexed).map((part) => part.type),
-    ["text", "text", "emote"]
+    core.tokenizeEmotes("hi  catJAM\tthere", indexed).map(({ type, value }) => [type, value]),
+    [["text", "hi  "], ["emote", "catJAM"], ["text", "\tthere"]]
   );
 });
 

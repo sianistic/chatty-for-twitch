@@ -1,4 +1,4 @@
-(function startChatty() {
+(function startCanty() {
   "use strict";
 
   const core = globalThis.ChattyCore;
@@ -42,8 +42,10 @@
     threadDirty: false,
     followLatest: true,
     search: null,
+    settingsToggle: null,
     settings: core.sanitizeSettings({}),
     emotes: new Map(),
+    emoteLoad: null,
     channel: "",
     seen: new Set(),
     outgoingDrafts: [],
@@ -91,6 +93,12 @@
       ".chat-scrollable-area__message-container"
     ].join(","),
     nativeInput: "[data-a-target='chat-input'][contenteditable='true']",
+    idleDraft: [
+      ".chat-input [contenteditable='true']",
+      ".chat-input textarea",
+      "[data-a-target='chat-input'][contenteditable='true']",
+      "[data-a-target='chat-input'] textarea"
+    ].join(","),
     composer: ".chat-input, [data-a-target='chat-input'][contenteditable='true']",
     replyContext: [
       "[data-a-target='chat-message-reply-context']",
@@ -229,13 +237,13 @@
     const panel = document.createElement("section");
     const logoUrl = chrome.runtime.getURL?.("assets/icons/chatty-32.png") || "assets/icons/chatty-32.png";
     panel.id = "chatty-panel";
-    panel.setAttribute("aria-label", "Chatty message stream");
+    panel.setAttribute("aria-label", "Canty message stream");
     panel.innerHTML = `
       <header class="chatty-header">
         <div class="chatty-title-wrap">
           <div class="chatty-title-line">
             <img class="chatty-logo" src="${logoUrl}" alt="">
-            <strong class="chatty-title">Chatty</strong>
+            <strong class="chatty-title">Canty</strong>
           </div>
           <span class="chatty-status">Connecting…</span>
         </div>
@@ -290,10 +298,11 @@
           <small class="chatty-emote-details"></small>
         </div>
       </div>
-      <div class="chatty-settings" hidden>
+      <div id="chatty-settings" class="chatty-settings" aria-label="Canty settings" hidden>
         <nav class="chatty-settings-tabs" aria-label="Settings sections">
-          <button type="button" class="chatty-tab is-active" data-settings-tab="chat">Chat</button>
-          <button type="button" class="chatty-tab" data-settings-tab="automation">Automation</button>
+          <button type="button" class="chatty-tab is-active" data-settings-tab="chat" aria-pressed="true">Chat</button>
+          <button type="button" class="chatty-tab" data-settings-tab="performance" aria-pressed="false">Performance</button>
+          <button type="button" class="chatty-tab" data-settings-tab="automation" aria-pressed="false">Automation</button>
         </nav>
         <section data-settings-panel="chat">
           <label>Highlight users <input data-setting="highlightUsers" placeholder="user1, user2"></label>
@@ -305,6 +314,23 @@
           <label class="chatty-check"><input type="checkbox" data-setting="timestamps"> Timestamps</label>
           <label class="chatty-check"><input type="checkbox" data-setting="compact"> Compact rows</label>
           <label>Font size <input type="range" min="10" max="22" data-setting="fontSize"></label>
+        </section>
+        <section data-settings-panel="performance" hidden>
+          <label>Chat history per tab
+            <input type="number" min="500" max="5000" step="1" inputmode="numeric" data-setting="maxMessages" aria-describedby="chatty-history-note">
+          </label>
+          <p class="chatty-settings-note" id="chatty-history-note">500–5,000 messages. A smaller history uses less memory and limits search and reply threads.</p>
+          <label class="chatty-check"><input type="checkbox" data-setting="textOnlyEmotes" aria-describedby="chatty-text-emotes-note"> Show emotes as text in chat</label>
+          <p class="chatty-settings-note" id="chatty-text-emotes-note">Skips Canty’s emote images and 7TV autocomplete. Twitch’s emote picker still works.</p>
+          <label>Unload idle Twitch tabs
+            <select data-setting="idleTwitchMinutes" aria-describedby="chatty-idle-tabs-note">
+              <option value="0">Off</option>
+              <option value="15">After 15 minutes</option>
+              <option value="30">After 30 minutes</option>
+              <option value="60">After 60 minutes</option>
+            </select>
+          </label>
+          <p class="chatty-settings-note" id="chatty-idle-tabs-note">Only idle background tabs are eligible. Playing streams, pinned tabs, and unsent chat stay open. Unloaded tabs reload when selected and lose their in-memory chat history.</p>
         </section>
         <section data-settings-panel="automation" hidden>
           <label class="chatty-check">
@@ -330,6 +356,7 @@
           </label>
           <small class="chatty-settings-note">A channel opens once when its state changes from offline to live.</small>
         </section>
+        <p class="chatty-save-error" role="alert" hidden>Could not save settings. Please try again.</p>
         <button type="button" class="chatty-save">Save settings</button>
       </div>`;
 
@@ -339,10 +366,15 @@
     searchToggle.setAttribute("aria-expanded", "false");
     searchToggle.setAttribute("aria-label", "Find in chat");
     searchToggle.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>`;
-    actions.append(searchToggle, makeButton("\u2699", "Chatty settings", toggleSettings));
+    const settingsToggle = makeButton("\u2699", "Canty settings", toggleSettings);
+    settingsToggle.setAttribute("aria-label", "Canty settings");
+    settingsToggle.setAttribute("aria-controls", "chatty-settings");
+    settingsToggle.setAttribute("aria-expanded", "false");
+    actions.append(searchToggle, settingsToggle);
     host.classList.add("chatty-host");
     host.append(panel);
     state.root = panel;
+    state.settingsToggle = settingsToggle;
     state.list = panel.querySelector(".chatty-list");
     state.virtualWindow = panel.querySelector(".chatty-virtual-window");
     state.virtualTop = panel.querySelector(".chatty-virtual-top");
@@ -380,6 +412,12 @@
     panel.querySelector(".chatty-prediction-open").addEventListener("click", openNativePrediction);
     panel.querySelector(".chatty-thread-close").addEventListener("click", closeThread);
     panel.querySelector(".chatty-save").addEventListener("click", savePanelSettings);
+    panel.querySelector(".chatty-settings").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || event.isComposing) return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleSettings();
+    });
     for (const tab of panel.querySelectorAll("[data-settings-tab]")) {
       tab.addEventListener("click", switchSettingsTab);
     }
@@ -397,7 +435,9 @@
   function switchSettingsTab(event) {
     const selected = event.currentTarget.dataset.settingsTab;
     for (const tab of state.root.querySelectorAll("[data-settings-tab]")) {
-      tab.classList.toggle("is-active", tab.dataset.settingsTab === selected);
+      const active = tab.dataset.settingsTab === selected;
+      tab.classList.toggle("is-active", active);
+      tab.setAttribute("aria-pressed", String(active));
     }
     for (const panel of state.root.querySelectorAll("[data-settings-panel]")) {
       panel.hidden = panel.dataset.settingsPanel !== selected;
@@ -484,6 +524,7 @@
   }
 
   function updateAutocomplete(event) {
+    if (state.settings.textOnlyEmotes) return;
     const context = autocompleteContext(event.currentTarget);
     if (!context) {
       hideAutocomplete();
@@ -691,7 +732,14 @@
   function toggleSettings() {
     const settings = state.root.querySelector(".chatty-settings");
     settings.hidden = !settings.hidden;
-    if (!settings.hidden) populateSettingsForm();
+    state.settingsToggle.setAttribute("aria-expanded", String(!settings.hidden));
+    if (settings.hidden) {
+      state.settingsToggle.focus({ preventScroll: true });
+    } else {
+      settings.querySelector(".chatty-save-error").hidden = true;
+      populateSettingsForm();
+      settings.querySelector(".chatty-tab.is-active").focus({ preventScroll: true });
+    }
   }
 
   function findClaimButton() {
@@ -699,12 +747,11 @@
   }
 
   function scanChannelPoints() {
-    if (!state.root) return;
+    if (!state.root || !state.settings.autoClaimPoints) return;
     const claim = findClaimButton();
 
     if (
       claim &&
-      state.settings.autoClaimPoints &&
       !state.claimedPointButtons.has(claim)
     ) {
       state.claimedPointButtons.add(claim);
@@ -732,27 +779,69 @@
   }
 
   async function savePanelSettings() {
+    const panel = state.root;
+    const save = panel.querySelector(".chatty-save");
+    const error = panel.querySelector(".chatty-save-error");
     const next = { ...state.settings };
-    for (const element of state.root.querySelectorAll("[data-setting]")) {
+    for (const element of panel.querySelectorAll("[data-setting]")) {
       const key = element.dataset.setting;
+      if (element.type === "number" && element.value === "") continue;
       next[key] = element.type === "checkbox" ? element.checked : element.value;
     }
-    state.settings = core.sanitizeSettings(next);
-    await chrome.storage.sync.set({ chattySettings: state.settings });
-    applySettings();
-    scanChannelPoints();
-    toggleSettings();
+    const settings = core.sanitizeSettings(next);
+    error.hidden = true;
+    save.disabled = true;
+    try {
+      await chrome.storage.sync.set({ chattySettings: settings });
+      if (state.root !== panel) return;
+      updateSettings(settings);
+      scanChannelPoints();
+      if (!panel.querySelector(".chatty-settings").hidden) toggleSettings();
+    } catch {
+      if (state.root === panel) error.hidden = false;
+    } finally {
+      save.disabled = false;
+    }
   }
 
-  function applySettings() {
+  function updateSettings(settings) {
+    const previous = state.settings;
+    state.settings = settings;
+    applySettings(previous);
+  }
+
+  function applySettings(previous) {
     if (!state.root) return;
-    state.root.style.setProperty("--chatty-font-size", `${state.settings.fontSize}px`);
-    state.root.classList.toggle("chatty-roomy", !state.settings.compact);
-    state.root.classList.toggle("chatty-no-time", !state.settings.timestamps);
-    state.virtualRowHeight = state.settings.compact ? VIRTUAL_ROW_HEIGHT : 34;
-    state.highlightMatcher = null;
-    state.virtualDirty = true;
-    scheduleVirtualRender();
+    const settings = state.settings;
+    const appearanceChanged = !previous || settings.fontSize !== previous.fontSize ||
+      settings.compact !== previous.compact || settings.timestamps !== previous.timestamps;
+    const highlightsChanged = !previous || settings.highlightColor !== previous.highlightColor ||
+      settings.mentionColor !== previous.mentionColor ||
+      JSON.stringify(settings.highlightUsers) !== JSON.stringify(previous.highlightUsers) ||
+      JSON.stringify(settings.highlightWords) !== JSON.stringify(previous.highlightWords);
+    const emotesChanged = previous && settings.textOnlyEmotes !== previous.textOnlyEmotes;
+    if (appearanceChanged) {
+      state.root.style.setProperty("--chatty-font-size", settings.fontSize + "px");
+      state.root.classList.toggle("chatty-roomy", !settings.compact);
+      state.root.classList.toggle("chatty-no-time", !settings.timestamps);
+      state.virtualRowHeight = settings.compact ? VIRTUAL_ROW_HEIGHT : 34;
+    }
+    if (highlightsChanged) state.highlightMatcher = null;
+    if (emotesChanged) {
+      state.pinnedSignature = "";
+      syncPinnedMessage();
+      if (state.threadAnchor) state.threadDirty = true;
+      hideAutocomplete();
+      hideEmoteCard({});
+      if (settings.textOnlyEmotes) {
+        state.emotes = new Map();
+        setStatus("Text-only emotes");
+      } else if (state.nativeContainer?.isConnected) {
+        loadEmotes(state.channel);
+      }
+    }
+    if (appearanceChanged || highlightsChanged || emotesChanged) state.virtualDirty = true;
+    if (state.virtualDirty || settings.maxMessages !== previous?.maxMessages) scheduleVirtualRender();
   }
 
   function setStatus(text) {
@@ -947,6 +1036,7 @@
   }
 
   function appendFragments(container, fragments) {
+    const textOnly = state.settings.textOnlyEmotes;
     for (const fragment of fragments) {
       if (fragment.type === "link") {
         const link = document.createElement("a");
@@ -959,6 +1049,10 @@
         continue;
       }
       if (fragment.type === "image") {
+        if (textOnly) {
+          container.append(document.createTextNode(fragment.alt || "emote"));
+          continue;
+        }
         const image = document.createElement("img");
         image.className = "chatty-emote";
         image.src = fragment.src;
@@ -973,6 +1067,10 @@
           id: twitchEmoteId(fragment.src)
         });
         container.append(image);
+        continue;
+      }
+      if (textOnly) {
+        container.append(document.createTextNode(fragment.value));
         continue;
       }
       for (const token of core.tokenizeEmotes(fragment.value, state.emotes)) {
@@ -1275,8 +1373,7 @@
       node;
   }
 
-  function readReplyContext(node) {
-    const context = findReplyContextNode(node);
+  function readReplyContext(node, context) {
     if (!context) return null;
 
     const parentUserNode = context.querySelector([
@@ -1332,8 +1429,8 @@
   }
 
   function readMessage(node) {
-    const reply = readReplyContext(node);
     const replyContext = findReplyContextNode(node);
+    const reply = readReplyContext(node, replyContext);
     const usernameNode = currentUsernameNode(node, replyContext);
     const username =
       usernameNode?.getAttribute("data-a-user") ||
@@ -1477,8 +1574,12 @@
 
   function closeThread() {
     state.threadAnchor = null;
+    state.threadDirty = false;
     const panel = state.root?.querySelector(".chatty-thread");
-    if (panel) panel.hidden = true;
+    if (panel) {
+      panel.hidden = true;
+      panel.querySelector(".chatty-thread-list").replaceChildren();
+    }
   }
 
   function holdReplyInteraction(event) {
@@ -2187,21 +2288,30 @@
 
   async function loadEmotes(channel) {
     const panel = state.root;
+    if (state.settings.textOnlyEmotes) {
+      setStatus("Text-only emotes");
+      return;
+    }
+    if (state.emoteLoad) return;
     setStatus("Loading 7TV…");
-    const response = await chrome.runtime.sendMessage({ type: "CHATTY_FETCH_7TV", channel })
-      .catch(() => null);
+    const load = chrome.runtime.sendMessage({ type: "CHATTY_FETCH_7TV", channel }).catch(() => null);
+    state.emoteLoad = load;
+    const response = await load;
     if (state.root !== panel) return;
+    state.emoteLoad = null;
+    if (state.settings.textOnlyEmotes) return;
     if (!response?.ok) {
       setStatus("7TV unavailable");
       return;
     }
-    state.emotes = core.indexEmotes([
+    state.emotes = Array.isArray(response.data.emotes) ?
+      new Map(response.data.emotes.map((emote) => [emote.name, emote])) : core.indexEmotes([
       response.data.global,
       response.data.channelSet
     ]);
     state.virtualDirty = true;
     scheduleVirtualRender();
-    setStatus(`${state.emotes.size} emotes`);
+    setStatus(state.emotes.size + " emotes");
   }
 
   function unmount() {
@@ -2247,7 +2357,12 @@
     state.threadDirty = false;
     state.followLatest = true;
     state.search = null;
+    state.settingsToggle = null;
     state.emotes = new Map();
+    state.emoteLoad = null;
+    state.autocompleteRange = null;
+    state.autocompleteQuery = "";
+    state.autocompleteIndex = 0;
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;
@@ -2309,11 +2424,28 @@
     }, 100);
   }
 
+  function canUnloadCurrentTwitchTab() {
+    if (!state.settings.enabled || !state.settings.idleTwitchMinutes || !document.hidden ||
+      channelFromLocation() !== state.channel ||
+      !state.root?.isConnected || !state.nativeComposer?.isConnected || !state.nativeContainer?.isConnected) return false;
+    if ([...document.querySelectorAll("video, audio")].some((media) =>
+      !media.paused && !media.ended || media.seeking || media === document.pictureInPictureElement
+    )) return false;
+    const editors = [...document.querySelectorAll(SELECTORS.idleDraft)];
+    if (!editors.some((editor) => state.nativeComposer.contains(editor))) return false;
+    if (editors.some((editor) => Boolean(
+      (editor.value ?? editor.textContent)?.replace(/[\s\u200B\uFEFF]/g, "") ||
+      editor.querySelector("img, [data-slate-void='true']")
+    ))) return false;
+    return !state.threadAnchor && state.search.panel.hidden &&
+      state.root.querySelector(".chatty-settings").hidden;
+  }
+
   async function boot() {
     const stored = await chrome.storage.sync.get("chattySettings");
     state.settings = core.sanitizeSettings(stored.chattySettings);
     const pageObserver = new MutationObserver((records) => {
-      const externalRecords = records.filter((record) => !state.root?.contains(record.target));
+      if (!state.settings.enabled) return;
       if (window.location.href !== state.route) {
         state.route = window.location.href;
         scheduleMount();
@@ -2321,7 +2453,7 @@
         scheduleMount();
       } else if (
         !state.nativeContainer?.isConnected &&
-        mutationsTouchSelector(externalRecords, SELECTORS.chatReady)
+        mutationsTouchSelector(records.filter((record) => !state.root?.contains(record.target)), SELECTORS.chatReady)
       ) {
         scheduleMount();
       }
@@ -2343,22 +2475,26 @@
       ) {
         syncPrediction();
       }
-      if (featureRecords.length && mutationsTouchSelector(featureRecords, SELECTORS.pointsClaim)) {
+      if (state.settings.autoClaimPoints && featureRecords.length &&
+        mutationsTouchSelector(featureRecords, SELECTORS.pointsClaim)) {
         schedulePointsScan();
       }
     });
     pageObserver.observe(document.documentElement, { childList: true, subtree: true });
+    chrome.runtime.onMessage?.addListener((message, sender, respond) => {
+      if (message?.type !== "CANTY_CHECK_IDLE_TAB" || sender?.id !== chrome.runtime.id) return;
+      respond({ canUnload: canUnloadCurrentTwitchTab() });
+    });
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "sync" || !changes.chattySettings) return;
-      state.settings = core.sanitizeSettings(changes.chattySettings.newValue);
+      const previousEnabled = state.settings.enabled;
+      updateSettings(core.sanitizeSettings(changes.chattySettings.newValue));
       if (!state.settings.enabled) unmount();
-      else {
-        applySettings();
-        scheduleMount();
-      }
+      else if (!previousEnabled || !state.root?.isConnected) scheduleMount();
+      else scanChannelPoints();
     });
     mount();
   }
 
-  boot().catch((error) => console.error("[Chatty] Failed to start:", error));
+  boot().catch((error) => console.error("[Canty] Failed to start:", error));
 })();

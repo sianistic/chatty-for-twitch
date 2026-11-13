@@ -1,7 +1,7 @@
 # Chrome Web Store Submission Guide
 
-This file contains the release-specific copy and declarations for Chatty for
-Twitch 0.10.0. Keep the dashboard answers, store description, privacy policy,
+This file contains the release-specific copy and declarations for Canty for
+Twitch 0.10.1. Keep the dashboard answers, store description, privacy policy,
 and actual extension behavior consistent.
 
 ## Upload package
@@ -21,7 +21,7 @@ Upload `dist/chatty-for-twitch.zip`. The archive contains `manifest.json`,
 
 **Name**
 
-Chatty for Twitch
+Canty for Twitch (from `manifest.json`)
 
 **Category**
 
@@ -34,7 +34,9 @@ A compact, customizable Twitch chat with 7TV emotes, highlights, replies, and na
 **Detailed description**
 
 ```text
-Chatty replaces Twitch's visible message stream with a compact, customizable chat while keeping account-sensitive actions inside Twitch's authenticated interface.
+Canty replaces Twitch's visible message stream with a compact, customizable chat while keeping account-sensitive actions inside Twitch's authenticated interface.
+
+Formerly Chatty for Twitch. Existing installs and settings carry over.
 
 Features:
 • Global and channel-specific 7TV emotes
@@ -46,12 +48,14 @@ Features:
 • Native Twitch message sending, user cards, replies, Channel Points, and Predictions
 • Moderator delete, timeout, and ban shortcuts when available
 • Virtualized chat rendering for busy channels
+• Adjustable chat history and a text-only emote option
+• Optional unloading for idle background Twitch tabs; tabs reload when selected
 • Optional Channel Points bonus claiming
 • Optional live-channel monitoring that opens a channel once when it goes live
 
-Automation is off by default. Chatty does not request Twitch credentials, include analytics or ads, sell user data, or execute remotely hosted code.
+Automation is off by default. Canty does not request Twitch credentials, include analytics or ads, sell user data, or execute remotely hosted code.
 
-Chatty is an unofficial community extension and is not affiliated with or endorsed by Twitch, 7TV, Chatterino, or the Chatty desktop client.
+Canty is an unofficial community extension and is not affiliated with or endorsed by Twitch, 7TV, Chatterino, or the Chatty desktop client.
 
 Twitch Channel Points used in Predictions are non-purchasable, have no monetary value, and cannot be redeemed for cash or prizes of value. Prediction participation and confirmation remain in Twitch's own interface.
 ```
@@ -82,25 +86,25 @@ Provide a compact, customizable Twitch chat interface and directly related Twitc
 `storage`
 
 ```text
-Stores the user's Chatty appearance, highlight, message-limit, and optional automation settings. Local storage also remembers the last online/offline state of user-selected channels so live monitoring opens a channel only once per transition.
+Stores the user's Canty appearance, highlight, message-limit, and optional automation settings. Local storage also remembers the last online/offline state of user-selected channels so live monitoring opens a channel only once per transition.
 ```
 
 `alarms`
 
 ```text
-Schedules periodic status checks only when the user enables live-channel monitoring and configures at least one channel. The alarm is cleared when the feature is disabled.
+Schedules live-status checks when live-channel monitoring is enabled and channels are configured. If the user enables idle tab unloading, a separate alarm checks for eligible Twitch tabs. Each alarm is cleared when its feature is disabled.
 ```
 
 `https://www.twitch.tv/*`
 
 ```text
-Limits Chatty's content script to Twitch pages, lets it read and replace the on-page chat presentation, delegates account-sensitive actions to Twitch's existing controls, and lets optional live-channel automation identify, focus, refresh, or open matching Twitch channel tabs.
+Limits Canty's content script to Twitch pages and lets it use Twitch's existing controls. This access also lets the optional live-channel and idle tab features identify matching Twitch channel tabs. Idle unloading checks page visibility, playback, and whether the chat input is empty before asking Chrome to unload an eligible tab.
 ```
 
 `https://7tv.io/*`
 
 ```text
-Fetches public global and channel-specific 7TV emote metadata. Chatty sends no Twitch credential or chat message to 7TV.
+Fetches public global and channel-specific 7TV emote metadata. Canty sends no Twitch credential or chat message to 7TV.
 ```
 
 `https://decapi.me/*`
@@ -125,7 +129,7 @@ is local:
 - website content: the Twitch chat, badges, emotes, pinned messages, Channel
   Points UI, and Predictions UI displayed on the current page; and
 - web history/browsing activity: the current Twitch channel URL and, when live
-  monitoring is enabled, matching open Twitch channel tabs.
+  monitoring or idle unloading is enabled, matching open Twitch channel tabs.
 
 For each category, declare that the information is used only for the extension's
 core functionality. Do not select advertising, creditworthiness, or sale to third
@@ -140,14 +144,15 @@ reviewer to use their own Twitch account.
 
 ```text
 1. Install the extension and open a Twitch channel with active chat.
-2. Confirm the visible message stream is replaced by the Chatty interface.
+2. Confirm the visible message stream is replaced by the Canty interface.
 3. Click the extension toolbar icon to disable or re-enable replacement chat.
-4. Open Chatty settings from the gear in its chat header to test display and highlight settings.
+4. Open Canty settings from the gear in its chat header to test display and highlight settings.
 5. Type at least two letters matching a 7TV emote to test autocomplete.
 6. Hover messages, usernames, badges, and emotes to test reply controls and metadata.
 7. Channel Points, Predictions, user cards, message sending, and moderation continue through Twitch's native authenticated controls and depend on the account/channel state.
-8. Optional point claiming and live-channel monitoring are disabled by default and can be enabled from Chatty settings.
+8. Optional point claiming and live-channel monitoring are disabled by default and can be enabled from Canty settings.
 9. Use the magnifying glass to find a loaded message by phrase or @username. Jump to latest returns to live chat.
+10. Open Settings → Performance to change the local history limit, switch to text-only emotes, or opt in to unloading idle Twitch tabs.
 ```
 
 ## Required listing graphics
@@ -158,7 +163,7 @@ reviewer to use their own Twitch account.
 - Optional marquee tile: 1400x560 pixels
 
 Use current, full-bleed screenshots that show the actual extension. Avoid claims
-such as "official," "best," or store rankings. Keep Chatty's logo and colors
+such as "official," "best," or store rankings. Keep Canty's logo and colors
 consistent across the icon, screenshots, and promotional graphics.
 
 ## Submission order
@@ -173,7 +178,7 @@ consistent across the icon, screenshots, and promotional graphics.
 ## Automated uploads from GitHub
 
 The `.github/workflows/publish-chrome-web-store.yml` workflow packages and
-tests Chatty before uploading it through Chrome Web Store API V2.
+tests Canty before uploading it through Chrome Web Store API V2.
 
 - Publishing a GitHub Release uploads the package and submits it for review.
 - **Actions → Publish to Chrome Web Store → Run workflow** can upload on demand.
@@ -200,7 +205,7 @@ JSON key in GitHub.
    - `GCP_WORKLOAD_IDENTITY_PROVIDER`: full Google provider resource name
    - `CHROME_WEBSTORE_SERVICE_ACCOUNT`: service-account email address
    - `CHROME_WEBSTORE_PUBLISHER_ID`: Chrome Web Store publisher ID
-   - `CHROME_WEBSTORE_EXTENSION_ID`: Chatty extension ID
+   - `CHROME_WEBSTORE_EXTENSION_ID`: Canty extension ID
 
 For this listing, the current identifiers are:
 
