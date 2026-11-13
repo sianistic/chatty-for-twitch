@@ -5,22 +5,43 @@
   const VIRTUAL_OVERSCAN = 10;
   const VIRTUAL_ROW_HEIGHT = 28;
   const VIRTUAL_VIEWPORT_FALLBACK = 480;
+  const VIRTUAL_HEIGHT_BLOCK = 64;
   const OUTGOING_ECHO_TTL = 15000;
+  const messageTime = new Intl.DateTimeFormat([], { hour: "2-digit", minute: "2-digit" });
   const state = {
     root: null,
     list: null,
+    jumpButton: null,
     virtualWindow: null,
     virtualTop: null,
     virtualBottom: null,
+    virtualRows: new Map(),
     messages: [],
+    historyStart: 0,
     virtualStart: -1,
     virtualEnd: -1,
+    virtualHistoryStart: 0,
+    virtualHistoryEnd: 0,
     virtualRowHeight: VIRTUAL_ROW_HEIGHT,
+    virtualRenderedEstimate: VIRTUAL_ROW_HEIGHT,
+    virtualWidth: 0,
+    virtualWindowHeight: 0,
+    measuredHeights: new Map(),
+    heightDeltas: new Map(),
     virtualRenderFrame: 0,
+    virtualRenderTimer: 0,
+    virtualResizeObserver: null,
     virtualDirty: false,
+    lastScrollMax: 0,
+    internalScrollTop: null,
+    highlightMatcher: null,
+    viewerName: "",
     replyInteractionUntil: 0,
+    activeReplyRow: null,
     threadAnchor: null,
+    threadDirty: false,
     followLatest: true,
+    search: null,
     settings: core.sanitizeSettings({}),
     emotes: new Map(),
     channel: "",
@@ -240,7 +261,13 @@
         <div class="chatty-prediction-title"></div>
         <div class="chatty-prediction-outcomes"></div>
       </aside>
-      <div class="chatty-list" role="log" aria-live="polite" aria-relevant="additions">
+      <div id="chatty-search" class="chatty-search" role="search" aria-label="Find in chat" hidden>
+        <input type="search" placeholder="Phrase or @username" aria-label="Search loaded chat">
+        <span class="chatty-search-status" role="status"></span>
+        <button type="button" class="chatty-search-older" title="Older match (Enter)" aria-label="Older match" disabled>↑</button>
+        <button type="button" class="chatty-search-newer" title="Newer match (Shift+Enter)" aria-label="Newer match" disabled>↓</button>
+      </div>
+      <div class="chatty-list" role="log" aria-label="Chat messages" aria-live="polite" aria-relevant="additions" tabindex="0">
         <div class="chatty-virtual-spacer chatty-virtual-top" aria-hidden="true"></div>
         <div class="chatty-virtual-window"></div>
         <div class="chatty-virtual-spacer chatty-virtual-bottom" aria-hidden="true"></div>
@@ -307,7 +334,12 @@
       </div>`;
 
     const actions = panel.querySelector(".chatty-actions");
-    actions.append(makeButton("\u2699", "Chatty settings", toggleSettings));
+    const searchToggle = makeButton("", "Find in chat", toggleChatSearch);
+    searchToggle.setAttribute("aria-controls", "chatty-search");
+    searchToggle.setAttribute("aria-expanded", "false");
+    searchToggle.setAttribute("aria-label", "Find in chat");
+    searchToggle.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/></svg>`;
+    actions.append(searchToggle, makeButton("\u2699", "Chatty settings", toggleSettings));
     host.classList.add("chatty-host");
     host.append(panel);
     state.root = panel;
@@ -316,7 +348,33 @@
     state.virtualTop = panel.querySelector(".chatty-virtual-top");
     state.virtualBottom = panel.querySelector(".chatty-virtual-bottom");
     state.list.addEventListener("scroll", handleVirtualScroll, { passive: true });
-    panel.querySelector(".chatty-jump").addEventListener("click", jumpToLatest);
+    state.list.addEventListener("wheel", handleVirtualWheel, { passive: true });
+    if (typeof ResizeObserver === "function") {
+      state.virtualResizeObserver = new ResizeObserver(scheduleVirtualRender);
+      state.virtualResizeObserver.observe(state.list);
+      state.virtualResizeObserver.observe(state.virtualWindow);
+    }
+    const searchPanel = panel.querySelector(".chatty-search");
+    state.search = {
+      panel: searchPanel,
+      toggle: searchToggle,
+      input: searchPanel.querySelector("input"),
+      status: searchPanel.querySelector(".chatty-search-status"),
+      older: searchPanel.querySelector(".chatty-search-older"),
+      newer: searchPanel.querySelector(".chatty-search-newer"),
+      query: "",
+      scannedThrough: 0,
+      matches: [],
+      selected: null,
+      target: null
+    };
+    state.search.input.addEventListener("input", findChatMessages);
+    state.search.input.addEventListener("compositionend", findChatMessages);
+    state.search.older.addEventListener("click", () => stepChatSearch(-1));
+    state.search.newer.addEventListener("click", () => stepChatSearch(1));
+    searchPanel.addEventListener("keydown", handleChatSearchKeys);
+    state.jumpButton = panel.querySelector(".chatty-jump");
+    state.jumpButton.addEventListener("click", jumpToLatest);
     panel.querySelector(".chatty-pinned-open").addEventListener("click", openNativePinned);
     panel.querySelector(".chatty-pinned-hide").addEventListener("click", hidePinnedMessage);
     panel.querySelector(".chatty-prediction-open").addEventListener("click", openNativePrediction);
@@ -692,8 +750,8 @@
     state.root.classList.toggle("chatty-roomy", !state.settings.compact);
     state.root.classList.toggle("chatty-no-time", !state.settings.timestamps);
     state.virtualRowHeight = state.settings.compact ? VIRTUAL_ROW_HEIGHT : 34;
+    state.highlightMatcher = null;
     state.virtualDirty = true;
-    trimMessageHistory();
     scheduleVirtualRender();
   }
 
@@ -702,59 +760,147 @@
     if (node && node.textContent !== text) node.textContent = text;
   }
 
-  function virtualViewportHeight() {
-    return state.list?.clientHeight || VIRTUAL_VIEWPORT_FALLBACK;
-  }
-
-  function virtualScrollHeight() {
-    return state.messages.length * state.virtualRowHeight;
-  }
-
-  function effectiveScrollHeight() {
-    if (!state.list) return virtualScrollHeight();
-    const viewport = virtualViewportHeight();
-    return state.list.scrollHeight > viewport
-      ? state.list.scrollHeight
-      : virtualScrollHeight();
-  }
-
-  function isNearBottom() {
-    if (!state.list) return true;
-    return (
-      effectiveScrollHeight() -
-      state.list.scrollTop -
-      virtualViewportHeight() <
-      80
-    );
+  function handleVirtualWheel(event) {
+    if (state.followLatest && !event.ctrlKey && event.deltaY < 0 && state.list.scrollTop > 0) {
+      state.followLatest = false;
+      scheduleVirtualRender();
+    }
   }
 
   function handleVirtualScroll() {
-    state.followLatest = isNearBottom();
+    const { scrollTop, scrollHeight, clientHeight } = state.list;
+    const internal = state.internalScrollTop;
+    state.internalScrollTop = null;
+    if (internal !== null && Math.abs(scrollTop - internal) <= 0.5) return;
+
+    const max = Math.max(0, scrollHeight - clientHeight);
+    // Resizing can generate a scroll event even though the reader didn't move.
+    if (max === state.lastScrollMax && state.search.target === null) {
+      state.followLatest = max - scrollTop <= 1;
+    }
     scheduleVirtualRender();
-    updateJumpButton();
+  }
+
+  function setVirtualScrollTop(top) {
+    const list = state.list;
+    const previous = list.scrollTop;
+    if (Math.abs(top - previous) <= 0.5) return;
+    list.scrollTop = top;
+    if (list.scrollTop !== previous) state.internalScrollTop = list.scrollTop;
   }
 
   function updateJumpButton() {
-    const button = state.root?.querySelector(".chatty-jump");
-    if (!button) return;
-    const nearBottom = state.followLatest || isNearBottom();
-    if (nearBottom) {
-      state.followLatest = true;
-      state.unreadCount = 0;
-    }
-    button.hidden = nearBottom;
-    button.textContent = state.unreadCount
+    const button = state.jumpButton;
+    if (state.followLatest) state.unreadCount = 0;
+    if (button.hidden !== state.followLatest) button.hidden = state.followLatest;
+    const label = state.unreadCount
       ? `${state.unreadCount} new - Jump to latest`
       : "Jump to latest";
+    if (button.textContent !== label) button.textContent = label;
   }
 
   function jumpToLatest() {
     if (!state.list) return;
+    selectChatSearchMatch(null);
     state.followLatest = true;
-    renderVirtualWindow();
-    state.list.scrollTop = effectiveScrollHeight();
-    state.unreadCount = 0;
-    updateJumpButton();
+    renderVirtualWindow(true);
+  }
+
+  function toggleChatSearch() {
+    const search = state.search;
+    search.panel.hidden = !search.panel.hidden;
+    search.toggle.setAttribute("aria-expanded", String(!search.panel.hidden));
+    if (search.panel.hidden) {
+      search.input.value = "";
+      findChatMessages();
+      search.toggle.focus({ preventScroll: true });
+    } else {
+      search.input.focus({ preventScroll: true });
+    }
+  }
+
+  function handleChatSearchKeys(event) {
+    if (event.isComposing) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleChatSearch();
+    } else if (event.key === "Enter" && event.target === state.search.input) {
+      event.preventDefault();
+      stepChatSearch(event.shiftKey ? 1 : -1);
+    }
+  }
+
+  function findChatMessages(event) {
+    if (event?.isComposing) return;
+    const search = state.search;
+    const query = search.input.value.trim().replace(/\s+/g, " ").toLowerCase();
+    if (query === search.query) return;
+    search.query = query;
+    search.matches = [];
+    search.scannedThrough = state.historyStart;
+    const userQuery = query.match(/^@([a-z0-9_]+)(?: (.+))?$/);
+    search.username = userQuery?.[1] || "";
+    search.phrase = userQuery ? (userQuery[2] || "") : query;
+    refreshChatSearch();
+    selectChatSearchMatch(search.matches.at(-1) ?? null);
+  }
+
+  function refreshChatSearch() {
+    const search = state.search;
+    if (!search.query) return;
+    const historyEnd = state.historyStart + state.messages.length;
+    if (search.matches[0] < state.historyStart) {
+      const expired = search.matches.findIndex((index) => index >= state.historyStart);
+      search.matches.splice(0, expired < 0 ? search.matches.length : expired);
+    } else if (search.scannedThrough === historyEnd) {
+      return;
+    }
+    if (search.selected !== null && search.selected < state.historyStart) {
+      selectChatSearchMatch(null);
+    }
+    for (let index = Math.max(0, search.scannedThrough - state.historyStart);
+      index < state.messages.length; index += 1) {
+      const message = state.messages[index];
+      if (search.username && message.username.toLowerCase() !== search.username) continue;
+      if (search.phrase && !message.text.toLowerCase().replace(/\s+/g, " ").includes(search.phrase)) continue;
+      search.matches.push(state.historyStart + index);
+    }
+    search.scannedThrough = historyEnd;
+    updateChatSearchStatus();
+  }
+
+  function updateChatSearchStatus() {
+    const search = state.search;
+    const count = search.matches.length;
+    const position = search.matches.indexOf(search.selected);
+    const label = !search.query ? "" : count === 0 ? "No matches" : position < 0
+      ? `${count} ${count === 1 ? "match" : "matches"}`
+      : `${position + 1} of ${count}`;
+    if (search.status.textContent !== label) search.status.textContent = label;
+    search.older.disabled = !count || position === 0;
+    search.newer.disabled = !count || position === count - 1;
+  }
+
+  function stepChatSearch(direction) {
+    const { matches, selected } = state.search;
+    const position = matches.indexOf(selected);
+    const index = position < 0 ? matches.length - 1 : position + direction;
+    if (index >= 0 && index < matches.length) selectChatSearchMatch(matches[index]);
+  }
+
+  function selectChatSearchMatch(index) {
+    const search = state.search;
+    if (search.selected !== null) {
+      const previous = state.messages[search.selected - state.historyStart];
+      state.virtualRows.get(previous)?.classList.remove("chatty-search-match");
+    }
+    search.selected = index;
+    search.target = index;
+    updateChatSearchStatus();
+    if (index === null) return;
+    state.followLatest = false;
+    scheduleVirtualRender();
   }
 
   function safeHttpUrl(value) {
@@ -1303,10 +1449,7 @@
     user.className = "chatty-thread-user";
     user.textContent = `@${message.username || "unknown"}`;
     const time = document.createElement("time");
-    time.textContent = new Date(message.timestamp || Date.now()).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    });
+    time.textContent = messageTime.format(message.timestamp || Date.now());
     meta.append(user, time);
     const body = document.createElement("div");
     body.className = "chatty-thread-text";
@@ -1338,7 +1481,8 @@
     if (panel) panel.hidden = true;
   }
 
-  function holdReplyInteraction() {
+  function holdReplyInteraction(event) {
+    state.activeReplyRow = event.currentTarget.closest(".chatty-message");
     state.replyInteractionUntil = Math.max(state.replyInteractionUntil, Date.now() + 650);
   }
 
@@ -1346,7 +1490,7 @@
     const row = document.createElement("div");
     row.className = "chatty-message";
     row.dataset.messageId = message.id;
-    const highlight = core.getHighlight(message, state.settings, findViewerName());
+    const highlight = state.highlightMatcher(message);
     if (highlight) {
       row.classList.add(`chatty-highlight-${highlight.type}`);
       row.style.setProperty("--chatty-highlight", highlight.color);
@@ -1355,10 +1499,7 @@
 
     const time = document.createElement("time");
     time.className = "chatty-time";
-    time.textContent = new Date(message.timestamp).toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    });
+    time.textContent = messageTime.format(message.timestamp);
     row.append(time);
 
     if (message.reply) {
@@ -1435,7 +1576,7 @@
     if (
       state.isModerator &&
       message.username &&
-      message.username.toLowerCase() !== findViewerName().toLowerCase()
+      message.username.toLowerCase() !== state.viewerName.toLowerCase()
     ) {
       row.append(buildModeratorActions(message));
     }
@@ -1446,70 +1587,216 @@
     const excess = state.messages.length - state.settings.maxMessages;
     if (excess <= 0) return;
     state.messages.splice(0, excess);
-    if (!state.followLatest && state.list) {
-      state.list.scrollTop = Math.max(
-        0,
-        state.list.scrollTop - excess * state.virtualRowHeight
-      );
-    }
+    state.historyStart += excess;
   }
 
-  function renderVirtualWindow() {
-    if (!state.list || !state.virtualWindow) return;
+  function storeVirtualHeight(index, height) {
+    const heights = state.measuredHeights;
+    const estimate = state.virtualRenderedEstimate;
+    const previous = heights.get(index) ?? estimate;
+    if (height === estimate) heights.delete(index);
+    else heights.set(index, height);
+    if (height === previous) return;
+
+    const block = Math.floor(index / VIRTUAL_HEIGHT_BLOCK);
+    const delta = (state.heightDeltas.get(block) || 0) + height - previous;
+    if (delta) state.heightDeltas.set(block, delta);
+    else state.heightDeltas.delete(block);
+  }
+
+  // Whole blocks keep spacer updates cheap even when thousands of rows have been measured.
+  function virtualRangeHeight(start, end) {
+    const estimate = state.virtualRenderedEstimate;
+    let height = (end - start) * estimate;
+    for (let index = start; index < end;) {
+      if (index % VIRTUAL_HEIGHT_BLOCK === 0 && index + VIRTUAL_HEIGHT_BLOCK <= end) {
+        height += state.heightDeltas.get(index / VIRTUAL_HEIGHT_BLOCK) || 0;
+        index += VIRTUAL_HEIGHT_BLOCK;
+      } else {
+        height += (state.measuredHeights.get(index) ?? estimate) - estimate;
+        index += 1;
+      }
+    }
+    return height;
+  }
+
+  function virtualEstimatedAnchor(start, end, offset) {
+    let low = start;
+    let high = Math.max(start, end - 1);
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (virtualRangeHeight(start, mid + 1) <= offset) low = mid + 1;
+      else high = mid;
+    }
+    return { index: low, offset: Math.max(0, offset - virtualRangeHeight(start, low)) };
+  }
+
+  function virtualScrollAnchor(scrollTop) {
+    const { virtualWindow, virtualTop, virtualHistoryStart, virtualHistoryEnd } = state;
+    const first = virtualHistoryStart + Math.max(0, state.virtualStart);
+    const top = virtualTop.getBoundingClientRect().height || virtualRangeHeight(virtualHistoryStart, first);
+    const localTop = scrollTop - top;
+    const rows = virtualWindow.children;
+    const height = virtualWindow.getBoundingClientRect().height;
+    if (localTop < 0) {
+      return virtualEstimatedAnchor(virtualHistoryStart, first, scrollTop);
+    }
+    if (!rows.length || !height) {
+      return virtualEstimatedAnchor(virtualHistoryStart, virtualHistoryEnd, scrollTop);
+    }
+    if (localTop >= height) {
+      return virtualEstimatedAnchor(first + rows.length, virtualHistoryEnd, localTop - height);
+    }
+
+    let low = 0;
+    let high = rows.length - 1;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      const row = rows[mid];
+      if (row.offsetTop + row.offsetHeight <= localTop) low = mid + 1;
+      else high = mid;
+    }
+    return { index: first + low, offset: localTop - rows[low].offsetTop };
+  }
+
+  function syncVirtualRows(messages) {
+    const { virtualWindow, virtualRows } = state;
+    if (state.virtualDirty) {
+      virtualWindow.replaceChildren();
+      virtualRows.clear();
+    } else {
+      const retained = new Set(messages);
+      for (const [message, row] of virtualRows) {
+        if (retained.has(message)) continue;
+        row.remove();
+        virtualRows.delete(message);
+      }
+    }
+
+    // The surviving rows are already in order. Leave them connected and insert only the gaps.
+    const additions = document.createDocumentFragment();
+    for (const message of messages) {
+      const existing = virtualRows.get(message);
+      if (existing) {
+        if (additions.firstChild) virtualWindow.insertBefore(additions, existing);
+      } else {
+        const row = createMessageRow(message);
+        virtualRows.set(message, row);
+        additions.append(row);
+      }
+    }
+    if (additions.firstChild) virtualWindow.append(additions);
+  }
+
+  function renderVirtualWindow(force = false) {
+    const { list, search } = state;
+    if (!list) return;
+    const viewport = list.clientHeight || VIRTUAL_VIEWPORT_FALLBACK;
+    const anchor = state.followLatest ? null : virtualScrollAnchor(list.scrollTop);
+    trimMessageHistory();
+    refreshChatSearch();
+    if (state.threadDirty) {
+      renderThread();
+      state.threadDirty = false;
+    }
+
     const total = state.messages.length;
-    const viewport = virtualViewportHeight();
-    const visibleRows = Math.ceil(viewport / state.virtualRowHeight);
-    const windowSize = visibleRows + VIRTUAL_OVERSCAN * 2;
-    const start = state.followLatest
-      ? Math.max(0, total - windowSize)
-      : Math.max(
-        0,
-        Math.min(
-          Math.floor(state.list.scrollTop / state.virtualRowHeight) - VIRTUAL_OVERSCAN,
-          Math.max(0, total - windowSize)
-        )
-      );
+    const windowSize = Math.ceil(viewport / VIRTUAL_ROW_HEIGHT) + VIRTUAL_OVERSCAN * 2;
+    const lastStart = Math.max(0, total - windowSize);
+    const index = anchor ? Math.max(0, Math.min(
+      (search.target ?? anchor.index) - state.historyStart,
+      total - 1
+    )) : 0;
+    const start = state.followLatest ? lastStart : Math.max(0, Math.min(index - VIRTUAL_OVERSCAN, lastStart));
     const end = Math.min(total, start + windowSize);
 
-    if (
-      !state.virtualDirty &&
-      start === state.virtualStart &&
-      end === state.virtualEnd
-    ) {
-      return;
+    const viewer = findViewerName();
+    if (!state.highlightMatcher || viewer !== state.viewerName) {
+      state.viewerName = viewer;
+      state.highlightMatcher = core.createHighlightMatcher(state.settings, viewer);
+      state.virtualDirty = true;
     }
 
-    const fragment = document.createDocumentFragment();
-    for (let index = start; index < end; index += 1) {
-      fragment.append(createMessageRow(state.messages[index]));
+    const windowChanged = state.virtualDirty || start !== state.virtualStart || end !== state.virtualEnd ||
+      state.historyStart !== state.virtualHistoryStart;
+    if (windowChanged) {
+      const messages = state.messages.slice(start, end);
+      if (!force && state.followLatest && state.activeReplyRow?.isConnected) {
+        const delay = state.replyInteractionUntil - Date.now();
+        const keepsReply = !state.virtualDirty && messages.some(
+          (message) => state.virtualRows.get(message) === state.activeReplyRow
+        );
+        if (!keepsReply && delay > 0) {
+          if (!state.virtualRenderTimer) {
+            state.virtualRenderTimer = setTimeout(() => {
+              state.virtualRenderTimer = 0;
+              scheduleVirtualRender();
+            }, delay);
+          }
+          return;
+        }
+      }
+      syncVirtualRows(messages);
     }
-    state.virtualWindow.replaceChildren(fragment);
-    state.virtualTop.style.height = `${start * state.virtualRowHeight}px`;
-    state.virtualBottom.style.height = `${(total - end) * state.virtualRowHeight}px`;
+
+    const width = list.clientWidth;
+    const layoutChanged = state.virtualDirty || state.virtualWidth !== width ||
+      state.virtualRenderedEstimate !== state.virtualRowHeight;
+    if (layoutChanged) {
+      state.measuredHeights.clear();
+      state.heightDeltas.clear();
+    } else {
+      for (let index = state.virtualHistoryStart; index < state.historyStart; index += 1) {
+        storeVirtualHeight(index, state.virtualRenderedEstimate);
+      }
+    }
+    state.virtualWidth = width;
+    state.virtualRenderedEstimate = state.virtualRowHeight;
+    const first = state.historyStart + start;
+    const last = state.historyStart + end;
+    const historyEnd = state.historyStart + total;
+    const renderedHeight = state.virtualWindow.getBoundingClientRect().height;
+    if (windowChanged || layoutChanged || renderedHeight !== state.virtualWindowHeight) {
+      const rows = state.virtualWindow.children;
+      for (let index = 0; index < rows.length; index += 1) {
+        const height = rows[index].getBoundingClientRect().height;
+        if (height) storeVirtualHeight(first + index, height);
+      }
+    }
+    state.virtualWindowHeight = renderedHeight;
+    const topHeight = virtualRangeHeight(state.historyStart, first);
+    const top = `${topHeight}px`;
+    const bottom = `${virtualRangeHeight(last, historyEnd)}px`;
+    if (state.virtualTop.style.height !== top) state.virtualTop.style.height = top;
+    if (state.virtualBottom.style.height !== bottom) state.virtualBottom.style.height = bottom;
     state.virtualStart = start;
     state.virtualEnd = end;
+    state.virtualHistoryStart = state.historyStart;
+    state.virtualHistoryEnd = historyEnd;
     state.virtualDirty = false;
 
+    const match = state.messages[search.selected === null ? -1 : search.selected - state.historyStart];
+    state.virtualRows.get(match)?.classList.add("chatty-search-match");
+    state.lastScrollMax = Math.max(0, list.scrollHeight - list.clientHeight);
     if (state.followLatest) {
-      state.list.scrollTop = effectiveScrollHeight();
-      state.unreadCount = 0;
+      setVirtualScrollTop(state.lastScrollMax);
+    } else if (windowChanged || search.target !== null) {
+      const row = state.virtualRows.get(state.messages[index]);
+      if (row) {
+        const offset = search.target !== null ? -Math.max(0, (viewport - row.offsetHeight) / 2)
+          : anchor.index < state.historyStart ? 0 : Math.min(anchor.offset, Math.max(0, row.offsetHeight - 1));
+        setVirtualScrollTop(Math.min(state.lastScrollMax, Math.max(0,
+          topHeight + row.offsetTop + offset
+        )));
+      }
     }
+    search.target = null;
     updateJumpButton();
   }
 
   function scheduleVirtualRender() {
-    if (state.virtualRenderFrame) return;
-    const interactionDelay = state.replyInteractionUntil - Date.now();
-    if (interactionDelay > 0) {
-      state.virtualRenderFrame = 1;
-      setTimeout(() => {
-        state.virtualRenderFrame = 0;
-        scheduleVirtualRender();
-      }, interactionDelay);
-      return;
-    }
-    state.virtualRenderFrame = 1;
-    queueMicrotask(() => {
+    if (!state.list || state.virtualRenderFrame) return;
+    state.virtualRenderFrame = requestAnimationFrame(() => {
       state.virtualRenderFrame = 0;
       renderVirtualWindow();
     });
@@ -1566,6 +1853,7 @@
   }
 
   function isDuplicateOutgoingEcho(message) {
+    if (!state.outgoingDrafts.length) return false;
     const text = normalizeEchoText(message.text);
     if (!text) return false;
     const now = Date.now();
@@ -1604,11 +1892,9 @@
       usernameNode: null,
       nativeNode: null
     });
-    trimMessageHistory();
-    if (state.threadAnchor) renderThread(state.threadAnchor);
+    if (state.threadAnchor) state.threadDirty = true;
     if (state.followLatest) state.unreadCount = 0;
     else state.unreadCount += 1;
-    state.virtualDirty = true;
     scheduleVirtualRender();
   }
 
@@ -1862,6 +2148,7 @@
     setTimeout(() => {
       state.processedNodes.delete(node);
       ingest(node);
+      trimMessageHistory();
     }, 0);
     return true;
   }
@@ -1886,19 +2173,24 @@
     state.isModerator = detectModerator(container);
     state.root?.classList.toggle("chatty-is-moderator", state.isModerator);
     ingest(container);
+    trimMessageHistory();
     state.observer = new MutationObserver((records) => {
       for (const record of records) {
         for (const node of record.addedNodes) {
           if (node.nodeType === Node.ELEMENT_NODE) ingest(node);
         }
       }
+      trimMessageHistory();
     });
     state.observer.observe(container, { childList: true, subtree: true });
   }
 
   async function loadEmotes(channel) {
+    const panel = state.root;
     setStatus("Loading 7TV…");
-    const response = await chrome.runtime.sendMessage({ type: "CHATTY_FETCH_7TV", channel });
+    const response = await chrome.runtime.sendMessage({ type: "CHATTY_FETCH_7TV", channel })
+      .catch(() => null);
+    if (state.root !== panel) return;
     if (!response?.ok) {
       setStatus("7TV unavailable");
       return;
@@ -1916,23 +2208,46 @@
     state.observer?.disconnect();
     state.nativeComposerAbort?.abort();
     state.nativeComposerResizeObserver?.disconnect();
+    state.virtualResizeObserver?.disconnect();
+    cancelAnimationFrame(state.virtualRenderFrame);
+    clearTimeout(state.virtualRenderTimer);
     state.nativeComposer?.classList.remove("chatty-native-composer");
     state.root?.parentElement?.style.removeProperty("--chatty-native-composer-height");
     state.root?.remove();
     document.querySelector(".chatty-host")?.classList.remove("chatty-host");
     state.root = null;
     state.list = null;
+    state.jumpButton = null;
     state.virtualWindow = null;
     state.virtualTop = null;
     state.virtualBottom = null;
+    state.virtualRows.clear();
     state.messages = [];
+    state.historyStart = 0;
     state.virtualStart = -1;
     state.virtualEnd = -1;
+    state.virtualHistoryStart = 0;
+    state.virtualHistoryEnd = 0;
+    state.virtualRenderedEstimate = VIRTUAL_ROW_HEIGHT;
+    state.virtualWidth = 0;
+    state.virtualWindowHeight = 0;
+    state.measuredHeights.clear();
+    state.heightDeltas.clear();
     state.virtualRenderFrame = 0;
+    state.virtualRenderTimer = 0;
+    state.virtualResizeObserver = null;
     state.virtualDirty = false;
+    state.lastScrollMax = 0;
+    state.internalScrollTop = null;
+    state.highlightMatcher = null;
+    state.viewerName = "";
     state.replyInteractionUntil = 0;
+    state.activeReplyRow = null;
     state.threadAnchor = null;
+    state.threadDirty = false;
     state.followLatest = true;
+    state.search = null;
+    state.emotes = new Map();
     state.nativeContainer = null;
     state.nativeComposer = null;
     state.nativeComposerAbort = null;

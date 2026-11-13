@@ -289,7 +289,9 @@ async function createFixture(options = {}) {
   options.beforeBoot?.(window);
   window.eval(coreSource);
   window.eval(contentSource);
-  await new Promise((resolve) => window.setTimeout(resolve, 25));
+  // Rendering is batched in rAF. Wait for the first commit even under parallel test load.
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
   return dom;
 }
 
@@ -853,20 +855,50 @@ test("filtered messages are automatically revealed and mirrored", async () => {
 });
 
 test("jump-to-latest control restores the bottom position", async () => {
-  const dom = await createFixture();
+  const dom = await createFixture({ beforeBoot(window) {
+    // Establish the viewport before Chatty renders so subsequent scroll events are user movement.
+    Object.defineProperties(window.HTMLElement.prototype, {
+      scrollHeight: { configurable: true, get: () => 1000 },
+      clientHeight: { configurable: true, get: () => 200 }
+    });
+  } });
   const { document, Event } = dom.window;
   const list = document.querySelector(".chatty-list");
-  Object.defineProperties(list, {
-    scrollHeight: { configurable: true, value: 1000 },
-    clientHeight: { configurable: true, value: 200 },
-    scrollTop: { configurable: true, writable: true, value: 100 }
-  });
+  list.scrollTop = 100;
   list.dispatchEvent(new Event("scroll"));
   const jump = document.querySelector(".chatty-jump");
-  assert.equal(jump.hidden, false);
+  assert.ok(await waitFor(dom.window, () => !jump.hidden));
   jump.click();
-  assert.equal(list.scrollTop, 1000);
+  assert.equal(list.scrollTop, 800);
   assert.equal(jump.hidden, true);
+});
+
+test("Find in Chat matches exact usernames and phrases and supports Escape", async () => {
+  const dom = await createFixture();
+  const { document, Event, KeyboardEvent } = dom.window;
+  const button = document.querySelector("[aria-controls='chatty-search']");
+  const search = document.querySelector("#chatty-search");
+  const input = search.querySelector("input");
+  const status = search.querySelector("[role='status']");
+  button.click();
+  assert.equal(document.activeElement, input);
+
+  const query = (value) => {
+    input.value = value;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  query("@ali");
+  assert.equal(status.textContent, "No matches");
+  query(" @ALICE  HELLO ");
+  const row = await waitFor(dom.window, () => document.querySelector(".chatty-search-match"));
+  assert.equal(row?.dataset.messageId, "message-1");
+  assert.equal(status.textContent, "1 of 1");
+
+  input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(search.hidden, true);
+  assert.equal(input.value, "");
+  assert.equal(document.activeElement, button);
+  assert.equal(document.querySelector(".chatty-search-match"), null);
 });
 
 test("pinned message UI includes attribution, content, and links", async () => {
@@ -1024,7 +1056,15 @@ test("busy player and chat mutations do not scan unrelated page features", async
 });
 
 test("busy chat virtualizes history and renders older messages while scrolling", async () => {
-  const dom = await createFixture({ settings: { maxMessages: 2000 } });
+  const dom = await createFixture({
+    settings: { maxMessages: 2000 },
+    beforeBoot(window) {
+      Object.defineProperties(window.HTMLElement.prototype, {
+        clientHeight: { configurable: true, get: () => 400 },
+        scrollHeight: { configurable: true, get: () => 6000 }
+      });
+    }
+  });
   const { document, Event } = dom.window;
   const scroller = document.querySelector("[data-a-target='chat-scroller']");
   const burst = document.createElement("div");
@@ -1074,11 +1114,6 @@ test("busy chat virtualizes history and renders older messages while scrolling",
       }
     }
   });
-  Object.defineProperty(document.querySelector(".chatty-virtual-window"), "scrollHeight", {
-    configurable: true,
-    get: () => 4000
-  });
-
   const jump = document.querySelector(".chatty-jump");
   jump.click();
 
