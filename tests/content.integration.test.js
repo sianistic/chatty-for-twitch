@@ -1084,21 +1084,19 @@ test("busy chat virtualizes history and renders older messages while scrolling",
   }
 
   scroller.append(burst);
-  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
+  assert.ok(await waitFor(dom.window, () => document.querySelector("[data-message-id='performance-399']")),
+    "the latest burst message should render");
 
   assert.ok(
     document.querySelectorAll(".chatty-message").length <= 80,
     "only the viewport and a small overscan buffer should exist in the live DOM"
   );
-  assert.ok(document.querySelector("[data-message-id='performance-399']"));
-
   const list = document.querySelector(".chatty-list");
   list.scrollTop = 0;
   list.dispatchEvent(new Event("scroll"));
-  await new Promise((resolve) => dom.window.setTimeout(resolve, 25));
 
   assert.ok(
-    document.querySelector("[data-message-id='performance-0']"),
+    await waitFor(dom.window, () => document.querySelector("[data-message-id='performance-0']")),
     "scrolling upward should render messages retained in the virtual history"
   );
 
