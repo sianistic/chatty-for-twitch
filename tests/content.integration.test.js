@@ -199,20 +199,37 @@ async function createFixture(options = {}) {
       pageObserverCallbackCapHit = false;
     }
   };
+  const runtimeRequests = [];
+  const storageWrites = [];
+  window.__chattyFixture = {
+    runtimeRequests,
+    storageWrites,
+    idleProbe: (sender = { id: "canty-test" }) => {
+      let response;
+      idleProbe?.({ type: "CANTY_CHECK_IDLE_TAB" }, sender, (value) => { response = value; });
+      return response;
+    }
+  };
+  let idleProbe;
   window.chrome = {
     runtime: {
-      sendMessage: async () => ({
-        ok: true,
-        data: {
-          global: options.emotePayload || { emotes: [] },
-          channelSet: null
-        }
-      })
+      id: "canty-test",
+      onMessage: { addListener: (listener) => { idleProbe = listener; } },
+      sendMessage: async (message) => {
+        runtimeRequests.push(message);
+        return {
+          ok: true,
+          data: {
+            global: options.emotePayload || { emotes: [] },
+            channelSet: null
+          }
+        };
+      }
     },
     storage: {
       sync: {
         get: async () => ({ chattySettings: options.settings || {} }),
-        set: async () => undefined
+        set: async (settings) => { storageWrites.push(settings); }
       },
       onChanged: { addListener: () => undefined }
     }
@@ -295,7 +312,7 @@ async function createFixture(options = {}) {
   return dom;
 }
 
-test("Chatty overlays the chat content and owns the visible composer", async () => {
+test("Canty overlays the chat content and owns the visible composer", async () => {
   const dom = await createFixture();
   const { document } = dom.window;
   const panel = document.querySelector("#chatty-panel");
@@ -308,6 +325,68 @@ test("Chatty overlays the chat content and owns the visible composer", async () 
   assert.ok(panel.querySelector("[data-setting='autoOpenLive']"));
 });
 
+test("Performance settings save and change rendering without replacing Twitch’s composer", async () => {
+  const dom = await createFixture();
+  const { document, __chattyFixture: fixture, KeyboardEvent } = dom.window;
+  const input = document.querySelector(".chatty-native-composer [contenteditable]");
+  const toggle = document.querySelector("[aria-controls='chatty-settings']");
+  toggle.click();
+  const performance = document.querySelector("[data-settings-tab='performance']");
+  performance.click();
+  assert.equal(performance.getAttribute("aria-pressed"), "true");
+  assert.equal(document.querySelector("[data-setting='maxMessages']").value, "2000");
+  assert.equal(document.querySelector("[data-setting='idleTwitchMinutes']").value, "0");
+  document.querySelector("[data-setting='maxMessages']").value = "500";
+  document.querySelector("[data-setting='idleTwitchMinutes']").value = "30";
+  document.querySelector("[data-setting='textOnlyEmotes']").checked = true;
+  document.querySelector(".chatty-save").click();
+  assert.ok(await waitFor(dom.window, () =>
+    document.querySelector(".chatty-content").textContent.includes("Kappa") &&
+    !document.querySelector(".chatty-content .chatty-emote")));
+  assert.equal(fixture.storageWrites[0].chattySettings.maxMessages, 500);
+  assert.equal(fixture.storageWrites[0].chattySettings.idleTwitchMinutes, 30);
+  assert.equal(document.querySelector(".chatty-native-composer [contenteditable]"), input);
+  assert.equal(document.activeElement, toggle);
+
+  toggle.click();
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(document.activeElement, toggle);
+});
+
+test("text-only emotes do not load 7TV metadata or emote images on startup", async () => {
+  const dom = await createFixture({ settings: { textOnlyEmotes: true } });
+  const { document, __chattyFixture: fixture } = dom.window;
+  assert.equal(fixture.runtimeRequests.length, 0);
+  assert.equal(document.querySelector(".chatty-emote"), null);
+  assert.match(document.querySelector(".chatty-content").textContent, /Kappa/);
+  assert.ok(document.querySelector(".chatty-content a"), "chat links still work");
+});
+
+test("a background Twitch page protects media playback and unfinished drafts", async () => {
+  const dom = await createFixture({ settings: { idleTwitchMinutes: 30 } });
+  const { document, __chattyFixture: fixture } = dom.window;
+  const input = document.querySelector(".chatty-native-composer [contenteditable]");
+  assert.equal(fixture.idleProbe().canUnload, false, "visible page");
+  Object.defineProperty(document, "hidden", { configurable: true, value: true });
+  assert.equal(fixture.idleProbe().canUnload, true);
+  assert.equal(fixture.idleProbe({ id: "another-extension" }), undefined);
+  input.textContent = "not sent";
+  assert.equal(fixture.idleProbe().canUnload, false);
+  input.replaceChildren(document.createElement("img"));
+  assert.equal(fixture.idleProbe().canUnload, false, "image-only emote draft");
+  input.replaceChildren();
+  const video = document.createElement("video");
+  Object.defineProperty(video, "paused", { value: false, configurable: true });
+  video.muted = true;
+  document.body.append(video);
+  assert.equal(fixture.idleProbe().canUnload, false, "muted video is still playing");
+  Object.defineProperty(video, "paused", { value: true });
+  assert.equal(fixture.idleProbe().canUnload, true);
+  input.remove();
+  assert.equal(fixture.idleProbe().canUnload, false, "missing native editor");
+});
+
 test("a delayed Twitch composer binds without a self-triggering observer loop", async () => {
   const dom = await createFixture({ includeComposer: false });
   const { document } = dom.window;
@@ -316,7 +395,7 @@ test("a delayed Twitch composer binds without a self-triggering observer loop", 
   assert.equal(
     metrics.pageObserverCallbackCapHit,
     false,
-    "Chatty must not keep mutating its own waiting status while Twitch is still loading"
+    "Canty must not keep mutating its own waiting status while Twitch is still loading"
   );
   assert.ok(
     metrics.pageObserverCallbackCount <= 8,
@@ -364,7 +443,7 @@ test("a delayed Twitch chat room replaces the early fallback mount and hydrates 
     1000
   );
   const panel = document.querySelector("#chatty-panel");
-  assert.ok(hydratedMessage, "Chatty should recover when Twitch inserts the real chat room");
+  assert.ok(hydratedMessage, "Canty should recover when Twitch inserts the real chat room");
   assert.ok(panel.parentElement.classList.contains("chat-room__content"));
   assert.ok(document.documentElement.classList.contains("chatty-active"));
   assert.ok(document.querySelector(".chatty-native-composer [data-a-target='chat-input']"));
@@ -544,7 +623,7 @@ test("emote hover displays provider and emote ID", async () => {
   assert.match(card.querySelector(".chatty-emote-details").textContent, /ID 25/);
 });
 
-test("Chatty exposes Twitch's real Slate composer instead of a synthetic bridge", async () => {
+test("Canty exposes Twitch's real Slate composer instead of a synthetic bridge", async () => {
   const dom = await createFixture();
   const { document } = dom.window;
   assert.equal(document.querySelector(".chatty-composer"), null);
@@ -722,7 +801,7 @@ test("past messages are hydrated after the delayed 7TV emote set loads", async (
   assert.ok(emote, "the startup message should be re-rendered with its 7TV emote");
 });
 
-test("points balance and claiming remain accessible from Chatty", async () => {
+test("points balance and claiming remain accessible from Canty", async () => {
   let claims = 0;
   const dom = await createFixture({
     onClaim: () => { claims += 1; }
@@ -856,7 +935,7 @@ test("filtered messages are automatically revealed and mirrored", async () => {
 
 test("jump-to-latest control restores the bottom position", async () => {
   const dom = await createFixture({ beforeBoot(window) {
-    // Establish the viewport before Chatty renders so subsequent scroll events are user movement.
+    // Establish the viewport before Canty renders so subsequent scroll events are user movement.
     Object.defineProperties(window.HTMLElement.prototype, {
       scrollHeight: { configurable: true, get: () => 1000 },
       clientHeight: { configurable: true, get: () => 200 }
@@ -1050,7 +1129,7 @@ test("busy player and chat mutations do not scan unrelated page features", async
   );
   assert.ok(
     dom.window.__chattyTestMetrics.pageFeatureSelectorChecks <= 6,
-    "native messages and Chatty's own rendering must not trigger page-feature subtree scans; " +
+    "native messages and Canty's own rendering must not trigger page-feature subtree scans; " +
       `received ${dom.window.__chattyTestMetrics.pageFeatureSelectorChecks}`
   );
 });

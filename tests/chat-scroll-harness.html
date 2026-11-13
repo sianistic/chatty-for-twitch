@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Chatty scroll regression harness</title>
+    <title>Canty scroll regression harness</title>
     <style>
       html,
       body {
@@ -202,7 +202,7 @@
           await settle(1);
         }
         if (!list?.querySelector(`[data-message-id='message-${messageCount - 1}']`)) {
-          throw new Error("Chatty did not mount its initial messages");
+          throw new Error("Canty did not mount its initial messages");
         }
 
         if (new URLSearchParams(location.search).get("case") === "burst") {

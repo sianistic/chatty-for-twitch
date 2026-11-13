@@ -1,19 +1,21 @@
 <p align="center">
-  <img src="assets/chatty-logo.png" alt="Chatty logo" width="152">
+  <img src="assets/chatty-logo.png" alt="Canty logo" width="152">
 </p>
 
-<h1 align="center">Chatty for Twitch</h1>
+<h1 align="center">Canty for Twitch</h1>
 
 <p align="center">
   A fast, compact, and customizable Twitch chat experience with 7TV emotes and native Twitch controls.
 </p>
 
 > [!NOTE]
-> Chatty is an unofficial community extension. It is not affiliated with or endorsed by Twitch, 7TV, Chatterino, or the Chatty desktop client.
+> Canty for Twitch was previously called Chatty for Twitch. The Chrome Web Store listing and saved settings carry over.
+>
+> Canty is an unofficial community extension. It is not affiliated with or endorsed by Twitch, 7TV, Chatterino, or the Chatty desktop client.
 
-## What Chatty does
+## What Canty does
 
-Chatty replaces the visible message stream on Twitch channel pages while keeping
+Canty replaces the visible message stream on Twitch channel pages while keeping
 Twitch's authenticated composer, Channel Points, user cards, moderation actions,
 and Predictions interfaces in control of account-sensitive actions.
 
@@ -31,12 +33,21 @@ and Predictions interfaces in control of account-sensitive actions.
 - Find in Chat searches loaded messages by phrase or `@username`
 - A virtualized list reuses visible rows and keeps your place in busy chats
 
+### Performance settings
+
+- Set the number of messages Canty keeps per tab, from 500 to 5,000.
+- Show emotes as text to skip Canty’s emote images and 7TV autocomplete.
+- Unload inactive Twitch channel tabs after 15, 30, or 60 minutes. This is
+  off by default. Canty skips active, pinned, playing, and audible tabs, and
+  tabs with unsent chat. A tab stays in the tab strip and reloads when you
+  return to it, so its in-memory chat history is lost.
+
 ### Native Twitch interactions
 
 - Send messages through Twitch's real authenticated composer
 - Click usernames to open Twitch's user cards
 - Hover a message to reveal a larger reply button
-- See the immediate parent of an incoming reply and open Chatty's
+- See the immediate parent of an incoming reply and open Canty's
   loaded-message thread view
 - Use moderator quick actions that send Twitch's native delete, timeout, and ban
   commands when Twitch exposes moderator access
@@ -58,7 +69,7 @@ Both automation features are disabled by default.
 
 ### Chrome Web Store
 
-[Install Chatty for Twitch from the Chrome Web Store](https://chromewebstore.google.com/detail/bmhholegchlkijagijghkjbofmcogndj).
+[Install Canty for Twitch from the Chrome Web Store](https://chromewebstore.google.com/detail/bmhholegchlkijagijghkjbofmcogndj).
 
 ### Load the unpacked extension
 
@@ -73,30 +84,30 @@ After changing local extension files, click **Reload** on the extensions page
 and refresh the Twitch tab. Pulling or downloading new files does not reload an
 already-running unpacked extension automatically.
 
-## Using Chatty
+## Using Canty
 
-The toolbar popup enables or disables the replacement chat. The settings button
-in Chatty's header controls timestamps, density, font size, retained-message
-count, highlight rules, highlight colors, point claiming, and live-channel
-monitoring.
+The toolbar popup enables or disables the replacement chat. Use the gear in
+Canty's header for appearance and highlights, the **Performance** tab for
+history, emotes, and idle tabs, and **Automation** for point claiming and
+live-channel monitoring.
 
-Click the magnifying glass in Chatty's header to find a phrase, an exact
+Click the magnifying glass in Canty's header to find a phrase, an exact
 `@username`, or a phrase from a specific user (for example, `@alice hello`).
 Use Enter to go to an older match, Shift+Enter for a newer one, and Escape to
 close search. Use **Jump to latest** to return to live chat. Search covers
 messages retained in the current tab.
 
-Chatty deliberately delegates chat sending, Channel Point spending, user cards,
+Canty deliberately delegates chat sending, Channel Point spending, user cards,
 moderation commands, and Prediction participation to Twitch's own authenticated
 controls. It does not request Twitch credentials or use private Twitch APIs.
 
 ## Privacy and permissions
 
-Chatty processes the Twitch chat content already displayed in your browser so it
+Canty processes the Twitch chat content already displayed in your browser so it
 can render the replacement interface. Chat messages are kept only in memory and
 are not sent to the developer or saved as chat history.
 
-Settings are saved with browser storage. Chatty requests public emote and channel
+Settings are saved with browser storage. Canty requests public emote and channel
 status data from 7TV and DecAPI over HTTPS. It contains no analytics, advertising,
 tracking, or remotely hosted executable code.
 
@@ -124,10 +135,10 @@ if Chrome is installed in a non-default location.
 
 ## Compatibility and limitations
 
-- Chatty supports Chromium browsers through Manifest V3.
-- Twitch regularly changes its internal page structure. Chatty has fallback
+- Canty supports Chromium browsers through Manifest V3.
+- Twitch regularly changes its internal page structure. Canty has fallback
   selectors and integration tests, but a future redesign may require an update.
-- The thread drawer can show only reply messages currently retained by Chatty.
+- The thread drawer can show only reply messages currently retained by Canty.
 - Channel-specific 7TV emotes are unavailable when a channel has no 7TV set.
 - Point spending and Prediction voting require Twitch to expose those controls
   for the signed-in account and channel.
@@ -136,7 +147,7 @@ if Chrome is installed in a non-default location.
 
 Report reproducible problems through
 [GitHub Issues](https://github.com/sianistic/chatty-for-twitch/issues). Include
-the browser version, Chatty version, Twitch channel, and steps that trigger the
+the browser version, Canty version, Twitch channel, and steps that trigger the
 problem. Do not include passwords, cookies, access tokens, or other private
 account information.
 

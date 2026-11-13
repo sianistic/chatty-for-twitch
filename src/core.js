@@ -11,6 +11,8 @@
     highlightColor: "#7c5cff",
     mentionColor: "#f0a83a",
     maxMessages: 2000,
+    textOnlyEmotes: false,
+    idleTwitchMinutes: 0,
     autoClaimPoints: false,
     autoOpenLive: false,
     liveChannels: [],
@@ -48,6 +50,10 @@
       highlightColor: color(input.highlightColor, DEFAULT_SETTINGS.highlightColor),
       mentionColor: color(input.mentionColor, DEFAULT_SETTINGS.mentionColor),
       maxMessages: integer(input.maxMessages, DEFAULT_SETTINGS.maxMessages, 500, 5000),
+      textOnlyEmotes: input.textOnlyEmotes === true,
+      idleTwitchMinutes: [15, 30, 60].includes(Number(input.idleTwitchMinutes))
+        ? Number(input.idleTwitchMinutes)
+        : 0,
       autoClaimPoints: input.autoClaimPoints === true,
       autoOpenLive: input.autoOpenLive === true,
       liveChannels: normalizeChannels(input.liveChannels),
@@ -171,11 +177,18 @@
     if (!(emotes instanceof Map) || emotes.size === 0) {
       return [{ type: "text", value }];
     }
-    const chunks = value.split(/(\s+)/);
-    return chunks.map((chunk) => {
-      const emote = emotes.get(chunk);
-      return emote ? { type: "emote", value: chunk, emote } : { type: "text", value: chunk };
-    });
+    const tokens = [];
+    let start = 0;
+    for (const match of value.matchAll(/\S+/g)) {
+      const name = match[0];
+      const emote = emotes.get(name);
+      if (!emote) continue;
+      if (match.index > start) tokens.push({ type: "text", value: value.slice(start, match.index) });
+      tokens.push({ type: "emote", value: name, emote });
+      start = match.index + name.length;
+    }
+    if (start < value.length || !tokens.length) tokens.push({ type: "text", value: value.slice(start) });
+    return tokens;
   }
 
   function findEmoteSuggestions(query, emotes, limit = 8) {
